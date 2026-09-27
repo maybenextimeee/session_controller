@@ -33,17 +33,22 @@
 
 ```bat
 py -m venv .venv
-.venv\Scripts\python -m pip install -r requirements-dev.txt
-.venv\Scripts\python -m session_controller
+.\.venv\Scripts\python -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python -m session_controller
 ```
 
-Первые две команды нужны один раз (и после изменения `requirements*.txt`),
-дальше достаточно последней.
+1. `py -m venv .venv` создаёт виртуальную среду (папку `.venv`). Нужна один раз.
+2. Вторая команда ставит библиотеки в эту среду. Нужна один раз и после изменения
+   `requirements*.txt`.
+3. Третья запускает программу. Дальше достаточно только её.
+
+Если PowerShell пишет «Не удалось загрузить модуль ".venv"», значит папки `.venv`
+ещё нет — выполни первую команду.
 
 Тесты движка:
 
 ```bat
-.venv\Scripts\python -m pytest
+.\.venv\Scripts\python -m pytest
 ```
 
 ## Структура
