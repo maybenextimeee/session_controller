@@ -4,8 +4,8 @@
 # установщик и портативный архив. Их можно скачать на вкладке Actions,
 # в разделе Artifacts нужного запуска.
 #
-# При пуше тега вида v0.4.0 дополнительно создаётся релиз на странице Releases
-# с установщиком и архивом.
+# При пуше тега вида v0.4.0 дополнительно создаётся релиз на странице Releases:
+# сверху текст из packaging/release-notes.md, в файлах — установщик.
 
 name: Build
 
@@ -57,6 +57,11 @@ jobs:
         run: |
           $version = python -c "import session_controller; print(session_controller.__version__)"
           "version=$version" >> $env:GITHUB_OUTPUT
+          # Тег релиза должен совпадать с версией программы, иначе установщик
+          # назовётся одной версией, а релиз — другой.
+          if ("${{ github.ref_type }}" -eq "tag" -and "${{ github.ref_name }}" -ne "v$version") {
+            throw "Tag ${{ github.ref_name }} does not match version $version in session_controller/__init__.py (expected v$version)"
+          }
 
       - name: Build installer
         shell: pwsh
@@ -116,7 +121,11 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/SessionController-Setup-*.exe
-            dist/SessionController-*-portable.zip
+          name: Session Controller ${{ steps.version.outputs.version }}
+          body_path: packaging/release-notes.md
+          # Под текстом из body_path GitHub допишет список изменений.
           generate_release_notes: true
+          # В релиз кладём только установщик: его и нужно скачивать.
+          # Портативный архив остаётся в Artifacts на вкладке Actions.
+          files: dist/SessionController-Setup-*.exe
+          fail_on_unmatched_files: true
