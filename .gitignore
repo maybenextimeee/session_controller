@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Виртуальное окружение
+.venv/
+venv/
+
+# Сборка (PyInstaller)
+build/
+dist/
+*.spec
+
+# IDE
+.vscode/
+.idea/
+
+# ОС
+Thumbs.db
+desktop.ini
+.DS_Store
