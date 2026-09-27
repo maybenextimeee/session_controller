@@ -61,10 +61,14 @@ def test_credentials_list_and_delete():
         pytest.skip(f"cmdkey недоступен: {added.stdout} {added.stderr}")
 
     try:
-        assert (name, 1) in credentials.list_all()
-        credentials.delete(name, 1)
-        assert (name, 1) not in credentials.list_all()
-        credentials.delete(name, 1)  # повторное удаление — не ошибка
+        # cmdkey сохраняет запись под именем «LegacyGeneric:target=<имя>».
+        found = [item for item in credentials.list_all() if item[0].endswith(name)]
+        assert len(found) == 1
+        full_name, kind = found[0]
+
+        credentials.delete(full_name, kind)
+        assert found[0] not in credentials.list_all()
+        credentials.delete(full_name, kind)  # повторное удаление — не ошибка
     finally:
         subprocess.run(["cmdkey", f"/delete:{name}"], capture_output=True)
 
