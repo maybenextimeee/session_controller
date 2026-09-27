@@ -70,6 +70,34 @@ jobs:
           & $iscc.FullName "/DAppVersion=${{ steps.version.outputs.version }}" packaging\installer.iss
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
 
+      - name: Test installer (install, run, uninstall)
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $setup = Get-ChildItem dist\SessionController-Setup-*.exe | Select-Object -First 1
+          $app = "$env:LOCALAPPDATA\Programs\Session Controller"
+          $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+
+          Start-Process $setup.FullName -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=autostart" -Wait
+          if (-not (Test-Path "$app\SessionController.exe")) { throw "Program was not installed" }
+          $autostart = (Get-ItemProperty $runKey -Name SessionController -ErrorAction Stop).SessionController
+          Write-Host "Autostart: $autostart"
+          if ($autostart -notlike "*--minimized") { throw "Unexpected autostart value" }
+
+          $env:SESSION_CONTROLLER_HOME = "$env:RUNNER_TEMP\sc-installed"
+          $p = Start-Process "$app\SessionController.exe" -ArgumentList "--smoke-test" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Installed exe failed, exit code $($p.ExitCode)" }
+
+          # Деинсталлятор перезапускает себя из временной папки, поэтому ждём, пока исчезнет exe.
+          Start-Process "$app\unins000.exe" -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART" -Wait
+          $deadline = (Get-Date).AddSeconds(60)
+          while ((Test-Path "$app\SessionController.exe") -and (Get-Date) -lt $deadline) { Start-Sleep 1 }
+          if (Test-Path "$app\SessionController.exe") { throw "Program was not uninstalled" }
+          if (Get-ItemProperty $runKey -Name SessionController -ErrorAction SilentlyContinue) {
+            throw "Autostart entry was not removed"
+          }
+          Write-Host "Install / run / uninstall OK"
+
       - name: Portable zip
         shell: pwsh
         run: |
