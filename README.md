@@ -26,6 +26,25 @@
 
 > Статус: ранняя разработка. Подробный план — в [docs/PLAN.md](docs/PLAN.md).
 
+## Установка
+
+Скачай `SessionController-Setup-<версия>.exe` на странице
+[Releases](https://github.com/maybenextimeee/session_controller/releases) и запусти.
+
+- Права администратора не нужны: программа ставится для текущего пользователя
+  Windows в `%LOCALAPPDATA%\Programs\Session Controller`.
+- Галочка «Запускать вместе с Windows» в установщике (и в самой программе)
+  включает автозапуск: программа сама появляется в трее при входе в Windows.
+  Так она не пропустит выключение компьютера и дочистит сессию после сбоя.
+- Без установки: архив `SessionController-<версия>-portable.zip` — распакуй
+  и запусти `SessionController.exe`.
+- При первом запуске Windows может показать синее окно «Система Windows защитила
+  ваш компьютер»: у программы пока нет цифровой подписи. Нажми «Подробнее» →
+  «Выполнить в любом случае».
+
+Удаляется как обычная программа: «Параметры → Приложения». Перед удалением
+заверши сессию, если она идёт.
+
 ## ⚠️ Важно знать
 
 - Откатывается **всё**, что сделано в этих программах за сессию, а не только входы
@@ -39,7 +58,7 @@
 - Пока сессия идёт, снимок «как было» лежит в `%LOCALAPPDATA%\SessionController\backup`.
 - Если что-то пошло не так, пригодится лог: `%LOCALAPPDATA%\SessionController\log.txt`.
 
-## Установка и запуск из исходников (Windows)
+## Запуск из исходников (Windows)
 
 Нужен Python 3.12 или новее: <https://www.python.org/downloads/>
 (при установке отметь «Add python.exe to PATH»).
@@ -70,6 +89,28 @@ py -m venv .venv
 .\.venv\Scripts\python -m pytest
 ```
 
+## Сборка exe и установщика
+
+Автоматически: при каждом пуше на GitHub сервер с Windows прогоняет тесты,
+собирает программу и установщик (вкладка **Actions** → нужный запуск →
+**Artifacts**). При пуше тега вида `v0.4.0` создаётся релиз на странице Releases:
+
+```bat
+git tag v0.4.0
+git push origin v0.4.0
+```
+
+Версия берётся из `session_controller/__init__.py` — перед релизом поменяй её там.
+
+Вручную на своём компьютере (для установщика нужен
+[Inno Setup 6](https://jrsoftware.org/isdl.php)):
+
+```bat
+powershell -ExecutionPolicy Bypass -File packaging\build.ps1
+```
+
+Результат в папке `dist`.
+
 ## Структура
 
 ```
@@ -84,10 +125,14 @@ session_controller/
 ├── credentials.py  ← диспетчер учётных данных Windows
 ├── settings.py     ← настройки
 ├── paths.py        ← где лежат файлы программы
-└── winapi.py       ← функции Windows, которых нет в Qt
-tests/              ← тесты (pytest)
+├── winapi.py       ← функции Windows, которых нет в Qt
+└── autostart.py    ← автозапуск вместе с Windows
+tests/              ← тесты (pytest); test_windows.py — только для Windows
+packaging/          ← сборка: exe (PyInstaller), установщик (Inno Setup), значок
+assets/icon.ico     ← значок для exe и установщика
+.github/workflows/  ← автосборка на GitHub
 docs/PLAN.md        ← план проекта, этапы, архитектура
-start.bat           ← запуск двойным кликом
+start.bat           ← запуск из исходников двойным кликом
 ```
 
 Чтобы добавить новую программу, достаточно описать её в `targets.py`:

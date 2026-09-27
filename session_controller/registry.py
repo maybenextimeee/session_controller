@@ -11,6 +11,8 @@ import sys
 if sys.platform == "win32":
     import winreg
 
+REG_SZ = 1  # тип «строка»
+
 
 def read(key: str, name: str) -> dict | None:
     if sys.platform != "win32":

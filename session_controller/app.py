@@ -1,5 +1,6 @@
 """Главное окно Session Controller и значок в трее."""
 
+import getpass
 import logging
 import sys
 from collections.abc import Callable
@@ -18,6 +19,7 @@ from PySide6.QtGui import (
     QPainter,
     QPixmap,
 )
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -33,16 +35,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from session_controller import __version__
+from session_controller import __version__, autostart
 from session_controller.paths import app_home
 from session_controller.session import Session, SessionError
 from session_controller.settings import Settings
 from session_controller.targets import Target, known_targets
-from session_controller.winapi import block_shutdown, unblock_shutdown
+from session_controller.winapi import block_shutdown, create_app_mutex, unblock_shutdown
 
 log = logging.getLogger(__name__)
 
 APP_NAME = "Session Controller"
+# По этому имени установщик понимает, что программа запущена (AppMutex в installer.iss).
+APP_MUTEX = "SessionControllerMutex"
+# Через этот канал вторая копия программы просит первую показать окно.
+INSTANCE_SERVER = f"SessionController-{getpass.getuser()}"
 
 BLUE = "#1e88e5"
 BLUE_DARK = "#1565c0"
@@ -132,6 +138,18 @@ class MainWindow(QMainWindow):
         self.shutdown_checkbox.setChecked(settings.logout_on_shutdown)
         self.shutdown_checkbox.toggled.connect(self.on_shutdown_option_changed)
 
+        self.autostart_checkbox = QCheckBox("Запускать вместе с Windows")
+        if autostart.is_supported():
+            self.autostart_checkbox.setChecked(autostart.is_enabled())
+            self.autostart_checkbox.setToolTip(
+                "Программа будет сама запускаться в трее при входе в Windows.\n"
+                "Так она не пропустит выключение компьютера и дочистит сессию после сбоя."
+            )
+        else:
+            self.autostart_checkbox.setEnabled(False)
+            self.autostart_checkbox.setToolTip("Доступно в установленной версии программы")
+        self.autostart_checkbox.toggled.connect(self.on_autostart_changed)
+
         layout = QVBoxLayout()
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(12)
@@ -140,6 +158,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.toggle_button)
         layout.addWidget(self.targets_box)
         layout.addWidget(self.shutdown_checkbox)
+        layout.addWidget(self.autostart_checkbox)
 
         central = QWidget()
         central.setLayout(layout)
@@ -164,6 +183,15 @@ class MainWindow(QMainWindow):
         app.commitDataRequest.connect(self.on_system_shutdown)
         # Запасной вариант: программу закрывают не по нашей кнопке «Выход».
         app.aboutToQuit.connect(self.on_about_to_quit)
+
+        self.instance_server = QLocalServer(self)
+        self.instance_server.newConnection.connect(self.on_other_instance_started)
+        # Мы единственная копия (это гарантирует app.lock), так что канал,
+        # оставшийся от аварийно закрытой копии, можно убрать.
+        QLocalServer.removeServer(INSTANCE_SERVER)
+        if not self.instance_server.listen(INSTANCE_SERVER):
+            log.warning("Не удалось открыть канал для второй копии: %s",
+                        self.instance_server.errorString())
 
         self.refresh()
 
@@ -296,6 +324,24 @@ class MainWindow(QMainWindow):
         self.settings.save(self.settings_path)
         log.info("Выход при выключении: %s", "да" if checked else "нет")
 
+    def on_autostart_changed(self, checked: bool) -> None:
+        try:
+            autostart.set_enabled(checked)
+        except OSError as error:
+            log.exception("Не удалось изменить автозапуск")
+            QMessageBox.warning(self, APP_NAME, f"Не удалось изменить автозапуск: {error}")
+            return
+        log.info("Автозапуск: %s", "да" if checked else "нет")
+
+    def on_other_instance_started(self) -> None:
+        """Программу запустили ещё раз (например, с ярлыка) — просто показываем окно."""
+        log.info("Программу запустили ещё раз — показываю окно")
+        connection = self.instance_server.nextPendingConnection()
+        if connection:
+            connection.disconnected.connect(connection.deleteLater)
+            connection.disconnectFromServer()
+        self.show_window()
+
     def on_targets_changed(self) -> None:
         self.settings.disabled_targets = [
             target_id for target_id, checkbox in self.target_checkboxes.items()
@@ -339,15 +385,15 @@ class MainWindow(QMainWindow):
             return
 
         event.ignore()
-        if self.session.is_active and QSystemTrayIcon.isSystemTrayAvailable():
-            # Пока идёт сессия, программа должна работать, чтобы поймать выключение.
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            # Программа продолжает работать в трее: так она поймает выключение
+            # компьютера. Совсем выйти можно через меню значка в трее.
             self.hide()
             if not self._tray_hint_shown:
-                self.tray.showMessage(
-                    APP_NAME,
-                    "Сессия продолжается. Программа работает здесь, в трее.",
-                    make_icon(),
-                )
+                text = "Программа работает здесь, в трее."
+                if self.session.is_active:
+                    text = "Сессия продолжается. " + text
+                self.tray.showMessage(APP_NAME, text, make_icon())
                 self._tray_hint_shown = True
         else:
             self.quit_app()
@@ -442,9 +488,25 @@ def setup_logging(home: Path) -> None:
 
 
 def main() -> int:
+    """Аргументы командной строки:
+
+    --minimized   не показывать окно, сразу спрятаться в трей (для автозапуска);
+    --smoke-test  запуститься и через секунду выйти (проверка сборки в CI).
+    """
     home = app_home()
     setup_logging(home)
-    log.info("Запуск %s %s", APP_NAME, __version__)
+    log.info("Запуск %s %s (%s)", APP_NAME, __version__, sys.executable)
+
+    if "--smoke-test" in sys.argv:
+        try:
+            return _run(home, minimized=False, smoke_test=True)
+        except Exception:
+            log.exception("Проверка сборки не прошла")
+            return 1
+    return _run(home, minimized="--minimized" in sys.argv, smoke_test=False)
+
+
+def _run(home: Path, minimized: bool, smoke_test: bool) -> int:
 
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
@@ -456,10 +518,14 @@ def main() -> int:
     # Две копии программы одновременно будут мешать друг другу.
     lock = QLockFile(str(home / "app.lock"))
     if not lock.tryLock(100):
-        QMessageBox.information(
-            None, APP_NAME, "Session Controller уже запущен — его значок в трее, возле часов."
-        )
+        if not _show_running_instance():
+            QMessageBox.information(
+                None, APP_NAME, "Session Controller уже запущен — его значок в трее, возле часов."
+            )
         return 0
+    create_app_mutex(APP_MUTEX)
+    if autostart.is_supported():
+        autostart.refresh_path()
 
     settings_path = home / "settings.json"
     settings = Settings.load(settings_path)
@@ -467,7 +533,27 @@ def main() -> int:
     session.load()
 
     window = MainWindow(session, settings, settings_path)
-    window.show()
+    if minimized and QSystemTrayIcon.isSystemTrayAvailable():
+        # Окно всё равно создаём: через него Windows сообщает о выключении.
+        window.winId()
+    else:
+        window.show()
     QTimer.singleShot(0, window.recover_after_restart)
 
-    return app.exec()
+    if smoke_test:
+        QTimer.singleShot(1000, app.quit)
+        window._user_quit = True
+    code = app.exec()
+    if smoke_test:
+        log.info("Проверка сборки прошла")
+    return code
+
+
+def _show_running_instance() -> bool:
+    """Попросить уже запущенную копию показать окно."""
+    socket = QLocalSocket()
+    socket.connectToServer(INSTANCE_SERVER)
+    if not socket.waitForConnected(1000):
+        return False
+    socket.disconnectFromServer()
+    return True

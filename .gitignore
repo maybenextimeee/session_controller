@@ -10,7 +10,6 @@ venv/
 # Сборка (PyInstaller)
 build/
 dist/
-*.spec
 
 # IDE
 .vscode/

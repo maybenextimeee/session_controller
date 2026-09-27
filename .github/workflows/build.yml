@@ -1,0 +1,94 @@
+# Автосборка на сервере GitHub с Windows.
+#
+# При каждом пуше: тесты → SessionController.exe → проверка запуска →
+# установщик и портативный архив. Их можно скачать на вкладке Actions,
+# в разделе Artifacts нужного запуска.
+#
+# При пуше тега вида v0.4.0 дополнительно создаётся релиз на странице Releases
+# с установщиком и архивом.
+
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Tests
+        run: python -m pytest -v
+
+      - name: Build exe
+        run: python -m PyInstaller --noconfirm --clean packaging/SessionController.spec
+
+      - name: Smoke test (start the exe and quit)
+        shell: pwsh
+        timeout-minutes: 2
+        run: |
+          $env:SESSION_CONTROLLER_HOME = "$env:RUNNER_TEMP\sc-smoke"
+          $p = Start-Process -FilePath "dist\SessionController\SessionController.exe" `
+            -ArgumentList "--smoke-test" -Wait -PassThru
+          Get-Content "$env:SESSION_CONTROLLER_HOME\log.txt" -ErrorAction SilentlyContinue
+          if ($p.ExitCode -ne 0) { throw "Smoke test failed, exit code $($p.ExitCode)" }
+
+      - name: Read version
+        id: version
+        shell: pwsh
+        run: |
+          $version = python -c "import session_controller; print(session_controller.__version__)"
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $find = { Get-ChildItem "${env:ProgramFiles(x86)}\Inno Setup*\ISCC.exe", "$env:ProgramFiles\Inno Setup*\ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 }
+          $iscc = & $find
+          if (-not $iscc) {
+            choco install innosetup --no-progress -y
+            $iscc = & $find
+          }
+          & $iscc.FullName "/DAppVersion=${{ steps.version.outputs.version }}" packaging\installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+
+      - name: Portable zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\SessionController `
+            -DestinationPath "dist\SessionController-${{ steps.version.outputs.version }}-portable.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SessionController-${{ steps.version.outputs.version }}
+          path: |
+            dist/SessionController-Setup-*.exe
+            dist/SessionController-*-portable.zip
+          if-no-files-found: error
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/SessionController-Setup-*.exe
+            dist/SessionController-*-portable.zip
+          generate_release_notes: true
