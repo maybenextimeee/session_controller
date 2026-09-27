@@ -2,7 +2,7 @@
 
 import json
 import logging
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -12,6 +12,9 @@ log = logging.getLogger(__name__)
 class Settings:
     # Галочка «Выходить из аккаунтов при выключении компьютера»
     logout_on_shutdown: bool = True
+    # Программы, с которых пользователь снял галочку в списке «Что очищать».
+    # Храним именно выключенные, чтобы новые программы по умолчанию были включены.
+    disabled_targets: list[str] = field(default_factory=list)
 
     @classmethod
     def load(cls, path: Path) -> "Settings":

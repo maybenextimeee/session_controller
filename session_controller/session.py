@@ -2,11 +2,12 @@
 
 Как это работает:
 
-1. «Начать сессию» — закрываем браузеры и делаем снимок их папок с данными.
-2. Дальше ты пользуешься браузером как обычно: открываешь, закрываешь, входишь
-   в аккаунты — всё сохраняется, как на своём компьютере.
-3. «Завершить сессию» (или выключение компьютера) — закрываем браузеры и
-   возвращаем их папки к снимку. Всё, что появилось за сессию, пропадает.
+1. «Начать сессию» — закрываем выбранные программы и запоминаем, как выглядят
+   их файлы со входами в аккаунты (и записи в хранилище паролей Windows).
+2. Дальше пользуешься всем как обычно: открываешь, закрываешь, входишь в
+   аккаунты — всё сохраняется, как на своём компьютере.
+3. «Завершить сессию» (или выключение компьютера) — закрываем программы и
+   возвращаем всё к запомненному. То, что появилось за сессию, пропадает.
 
 Журнал (session.json) лежит на диске, пока сессия идёт. Благодаря ему сессия
 переживает перезапуск программы и компьютера, а если завершение прервалось
@@ -19,17 +20,18 @@
 import json
 import logging
 import os
-from dataclasses import asdict
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
 import psutil
 
-from session_controller import browsers as browsers_mod
-from session_controller import snapshot
-from session_controller.browsers import Browser
+from session_controller import credentials, processes, registry, snapshot
+from session_controller.targets import CREDENTIALS, Target
 
 log = logging.getLogger(__name__)
+
+Progress = Callable[[str], None]
 
 
 class SessionError(Exception):
@@ -37,15 +39,15 @@ class SessionError(Exception):
 
 
 class Session:
-    def __init__(self, home: Path, browsers: list[Browser]) -> None:
+    def __init__(self, home: Path, targets: list[Target]) -> None:
         self.home = home
-        self.browsers = browsers
+        self.targets = targets
         self.journal_path = home / "session.json"
         self.backup_root = home / "backup"
 
         self.started_at: datetime | None = None
         self._boot_time: float | None = None
-        # Что было на момент начала сессии: [{"browser": Browser, "existed": bool}, ...]
+        # Что запомнили в начале сессии, по записи на каждую программу (см. _snapshot).
         self._entries: list[dict] = []
 
     @property
@@ -54,8 +56,9 @@ class Session:
 
     def load(self) -> None:
         """Вызвать при запуске программы: подхватить незавершённую сессию, если она есть."""
-        for browser in self.browsers:
-            snapshot.clean_trash(browser.data_dir.parent)
+        for target in self.targets:
+            for path in target.paths:
+                snapshot.clean_trash(path.parent)
 
         try:
             data = json.loads(self.journal_path.read_text(encoding="utf-8"))
@@ -66,17 +69,22 @@ class Session:
 
         self.started_at = datetime.fromisoformat(data["started_at"])
         self._boot_time = data["boot_time"]
-        self._entries = [
-            {"browser": _browser_from_json(entry["browser"]), "existed": entry["existed"]}
-            for entry in data["browsers"]
-        ]
+        self._entries = data["targets"]
         log.info("Найдена незавершённая сессия от %s", self.started_at)
 
-    def installed_browsers(self) -> list[Browser]:
-        return [b for b in self.browsers if b.data_dir.is_dir()]
+    def installed_targets(self) -> list[Target]:
+        return [t for t in self.targets if t.is_installed()]
 
-    def running_browsers(self) -> list[Browser]:
-        return [b for b in self.installed_browsers() if browsers_mod.is_running(b)]
+    def session_targets(self) -> list[Target]:
+        """Программы, которые очищаются в текущей сессии."""
+        return [_target_from_entry(entry) for entry in self._entries]
+
+    def running(self, targets: list[Target]) -> list[Target]:
+        return processes.running(targets)
+
+    def check_can_close(self, targets: list[Target]) -> None:
+        """Ошибка, если Session Controller запущен изнутри одной из этих программ."""
+        _refuse_if_launched_from(targets)
 
     def computer_restarted_since_start(self) -> bool:
         """Был ли компьютер перезагружен (или выключен) с начала сессии."""
@@ -87,57 +95,52 @@ class Session:
     def adopt_current_boot(self) -> None:
         """Сессия пережила перезагрузку и продолжается — запомнить новую загрузку."""
         self._boot_time = psutil.boot_time()
-        self._write_journal(self.started_at, self._boot_time, self._entries)
+        self._write_journal()
 
-    def start(self) -> None:
-        """Начать сессию. Открытые браузеры будут закрыты."""
+    def start(self, targets: list[Target], progress: Progress | None = None) -> None:
+        """Начать сессию для выбранных программ. Открытые программы будут закрыты."""
         if self.is_active:
             raise SessionError("Сессия уже идёт")
+        _refuse_if_launched_from(targets)
 
-        browsers_mod.close(self.browsers)
+        processes.close(targets)
         snapshot.delete_tree(self.backup_root)
 
         entries = []
         try:
-            for browser in self.browsers:
-                existed = browser.data_dir.is_dir()
-                if existed:
-                    log.info("Снимок: %s (%s)", browser.name, browser.data_dir)
-                    snapshot.backup(browser.data_dir, self.backup_root / browser.id)
-                entries.append({"browser": browser, "existed": existed})
+            for target in targets:
+                if progress:
+                    progress(f"Запоминаю: {target.name}…")
+                entries.append(self._snapshot(target))
         except OSError as error:
             log.exception("Не удалось сделать снимок")
             snapshot.delete_tree(self.backup_root)
-            raise SessionError(f"Не удалось сохранить состояние браузеров: {error}") from error
+            raise SessionError(f"Не удалось сохранить состояние: {error}") from error
 
-        started_at = datetime.now()
-        boot_time = psutil.boot_time()
-        self._write_journal(started_at, boot_time, entries)
-
-        self.started_at = started_at
-        self._boot_time = boot_time
+        self.started_at = datetime.now()
+        self._boot_time = psutil.boot_time()
         self._entries = entries
-        log.info("Сессия начата")
+        self._write_journal()
+        log.info("Сессия начата: %s", ", ".join(t.name for t in targets))
 
-    def end(self) -> None:
-        """Завершить сессию: вернуть браузеры к состоянию до её начала."""
+    def end(self, progress: Progress | None = None) -> None:
+        """Завершить сессию: вернуть всё к состоянию до её начала."""
         if not self.is_active:
             raise SessionError("Сессия не запущена")
 
-        browsers_mod.close(entry["browser"] for entry in self._entries)
+        targets = self.session_targets()
+        _refuse_if_launched_from(targets)
+        processes.close(targets)
 
         failed = []
         for entry in self._entries:
-            browser = entry["browser"]
+            if progress:
+                progress(f"Очищаю: {entry['name']}…")
             try:
-                if entry["existed"]:
-                    snapshot.restore(self.backup_root / browser.id, browser.data_dir)
-                else:
-                    # Браузер впервые запустили во время сессии — удаляем всё целиком.
-                    snapshot.remove(browser.data_dir)
+                self._restore(entry)
             except OSError:
-                log.exception("Не удалось очистить %s", browser.name)
-                failed.append(browser.name)
+                log.exception("Не удалось очистить %s", entry["name"])
+                failed.append(entry["name"])
 
         if failed:
             # Журнал и снимок оставляем: завершение можно будет просто повторить.
@@ -150,14 +153,60 @@ class Session:
         self._entries = []
         log.info("Сессия завершена")
 
-    def _write_journal(self, started_at: datetime, boot_time: float, entries: list[dict]) -> None:
+    # ---------- Снимок и восстановление одной программы ----------
+
+    def _snapshot(self, target: Target) -> dict:
+        entry = {
+            "id": target.id,
+            "name": target.name,
+            "kind": target.kind,
+            "process_names": list(target.process_names),
+            "exe_hint": target.exe_hint,
+            "paths": [],
+            "registry": [],
+            "credentials": [],
+        }
+
+        if target.kind == CREDENTIALS:
+            entry["credentials"] = [list(item) for item in credentials.list_all()]
+            return entry
+
+        for index, path in enumerate(target.paths):
+            existed = os.path.lexists(path)
+            if existed:
+                log.info("Снимок: %s (%s)", target.name, path)
+                snapshot.backup(path, self._backup_path(target.id, index), target.skip)
+            entry["paths"].append({"path": str(path), "existed": existed})
+
+        for key, name in target.registry_values:
+            entry["registry"].append({"key": key, "name": name, "value": registry.read(key, name)})
+
+        return entry
+
+    def _restore(self, entry: dict) -> None:
+        if entry["kind"] == CREDENTIALS:
+            _delete_new_credentials(entry["credentials"])
+            return
+
+        for index, item in enumerate(entry["paths"]):
+            path = Path(item["path"])
+            if item["existed"]:
+                snapshot.restore(self._backup_path(entry["id"], index), path)
+            else:
+                # Появилось за сессию (например, программу запустили впервые) — удаляем.
+                snapshot.remove(path)
+
+        for item in entry["registry"]:
+            registry.write(item["key"], item["name"], item["value"])
+
+    def _backup_path(self, target_id: str, index: int) -> Path:
+        return self.backup_root / target_id / str(index)
+
+    def _write_journal(self) -> None:
         data = {
-            "started_at": started_at.isoformat(),
-            "boot_time": boot_time,
-            "browsers": [
-                {"browser": _browser_to_json(e["browser"]), "existed": e["existed"]}
-                for e in entries
-            ],
+            "started_at": self.started_at.isoformat(),
+            "boot_time": self._boot_time,
+            "targets": self._entries,
         }
         self.home.mkdir(parents=True, exist_ok=True)
         tmp = self.journal_path.with_suffix(".tmp")
@@ -165,18 +214,36 @@ class Session:
         os.replace(tmp, self.journal_path)
 
 
-def _browser_to_json(browser: Browser) -> dict:
-    data = asdict(browser)
-    data["data_dir"] = str(browser.data_dir)
-    data["process_names"] = list(browser.process_names)
-    return data
+def _delete_new_credentials(before: list[list]) -> None:
+    known = {tuple(item) for item in before}
+    for name, kind in credentials.list_all():
+        if (name, kind) in known or credentials.is_system(name):
+            continue
+        try:
+            credentials.delete(name, kind)
+            log.info("Удалена запись из диспетчера учётных данных: %s", name)
+        except OSError:
+            # Не блокируем завершение сессии из-за одной записи — только пишем в лог.
+            log.exception("Не удалось удалить запись %s", name)
 
 
-def _browser_from_json(data: dict) -> Browser:
-    return Browser(
-        id=data["id"],
-        name=data["name"],
-        data_dir=Path(data["data_dir"]),
-        process_names=tuple(data["process_names"]),
-        exe_hint=data.get("exe_hint", ""),
+def _refuse_if_launched_from(targets: list[Target]) -> None:
+    parent = processes.launched_from(targets)
+    if parent:
+        raise SessionError(
+            f"Session Controller запущен изнутри {parent.name} (например, из его терминала), "
+            f"поэтому не может закрыть {parent.name}.\n\n"
+            f"Запусти Session Controller отдельно (файлом start.bat) "
+            f"или сними галочку «{parent.name}» в списке «Что очищать»."
+        )
+
+
+def _target_from_entry(entry: dict) -> Target:
+    return Target(
+        entry["id"],
+        entry["name"],
+        kind=entry["kind"],
+        paths=tuple(Path(item["path"]) for item in entry["paths"]),
+        process_names=tuple(entry["process_names"]),
+        exe_hint=entry["exe_hint"],
     )

@@ -7,11 +7,22 @@ from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from PySide6.QtCore import QLockFile, Qt, QTimer
-from PySide6.QtGui import QCloseEvent, QColor, QFont, QIcon, QPainter, QPixmap
+from PySide6.QtCore import QLockFile, QRectF, Qt, QTimer
+from PySide6.QtGui import (
+    QAction,
+    QCloseEvent,
+    QColor,
+    QFont,
+    QIcon,
+    QLinearGradient,
+    QPainter,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QGridLayout,
+    QGroupBox,
     QLabel,
     QMainWindow,
     QMenu,
@@ -23,15 +34,54 @@ from PySide6.QtWidgets import (
 )
 
 from session_controller import __version__
-from session_controller.browsers import known_browsers
 from session_controller.paths import app_home
-from session_controller.session import Session
+from session_controller.session import Session, SessionError
 from session_controller.settings import Settings
+from session_controller.targets import Target, known_targets
 from session_controller.winapi import block_shutdown, unblock_shutdown
 
 log = logging.getLogger(__name__)
 
 APP_NAME = "Session Controller"
+
+BLUE = "#1e88e5"
+BLUE_DARK = "#1565c0"
+BLUE_LIGHT = "#42a5f5"
+GREEN = "#2e9e44"
+GRAY = "#9e9e9e"
+
+STYLE = f"""
+QLabel#title {{
+    color: {BLUE};
+    font-size: 16pt;
+    font-weight: 700;
+}}
+QPushButton#primary {{
+    background-color: {BLUE};
+    color: white;
+    border: none;
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-size: 11pt;
+    font-weight: 600;
+}}
+QPushButton#primary:hover {{ background-color: #1976d2; }}
+QPushButton#primary:pressed {{ background-color: {BLUE_DARK}; }}
+QPushButton#primary:disabled {{ background-color: #90caf9; }}
+QGroupBox {{
+    border: 1px solid #90caf9;
+    border-radius: 8px;
+    margin-top: 14px;
+    padding: 10px 8px 6px 8px;
+}}
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    left: 12px;
+    padding: 0 4px;
+    color: {BLUE};
+    font-weight: 600;
+}}
+"""
 
 
 class MainWindow(QMainWindow):
@@ -44,23 +94,34 @@ class MainWindow(QMainWindow):
         self._tray_hint_shown = False
 
         self.setWindowTitle(f"{APP_NAME} {__version__}")
-        self.setMinimumSize(420, 240)
+        self.setWindowIcon(make_icon())
+        self.setMinimumWidth(460)
+
+        title = QLabel(APP_NAME)
+        title.setObjectName("title")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.status_label = QLabel()
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        status_font = self.status_label.font()
-        status_font.setPointSize(status_font.pointSize() + 4)
-        status_font.setBold(True)
-        self.status_label.setFont(status_font)
-
-        self.browsers_label = QLabel()
-        self.browsers_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.browsers_label.setWordWrap(True)
-        self.browsers_label.setStyleSheet("color: gray;")
+        self.status_label.setTextFormat(Qt.TextFormat.RichText)
 
         self.toggle_button = QPushButton()
-        self.toggle_button.setMinimumHeight(48)
+        self.toggle_button.setObjectName("primary")
+        self.toggle_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.toggle_button.clicked.connect(self.toggle_session)
+
+        self.targets_box = QGroupBox("Что очищать")
+        targets_layout = QGridLayout(self.targets_box)
+        self.target_checkboxes: dict[str, QCheckBox] = {}
+        for index, target in enumerate(session.installed_targets()):
+            checkbox = QCheckBox(target.name)
+            checkbox.setToolTip(target.hint)
+            checkbox.setChecked(target.id not in settings.disabled_targets)
+            checkbox.toggled.connect(self.on_targets_changed)
+            targets_layout.addWidget(checkbox, index // 2, index % 2)
+            self.target_checkboxes[target.id] = checkbox
+        if not self.target_checkboxes:
+            targets_layout.addWidget(QLabel("Не найдено ни одной поддерживаемой программы"))
 
         self.shutdown_checkbox = QCheckBox("Выходить из аккаунтов при выключении компьютера")
         self.shutdown_checkbox.setToolTip(
@@ -72,22 +133,31 @@ class MainWindow(QMainWindow):
         self.shutdown_checkbox.toggled.connect(self.on_shutdown_option_changed)
 
         layout = QVBoxLayout()
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(12)
+        layout.addWidget(title)
         layout.addWidget(self.status_label)
-        layout.addWidget(self.browsers_label)
         layout.addWidget(self.toggle_button)
+        layout.addWidget(self.targets_box)
         layout.addWidget(self.shutdown_checkbox)
 
         central = QWidget()
         central.setLayout(layout)
         self.setCentralWidget(central)
 
-        self.tray = QSystemTrayIcon(self)
+        self.tray = QSystemTrayIcon(make_icon(), self)
         self.tray_menu = QMenu()
+        self.tray_status_action = QAction(self.tray_menu)
+        self.tray_status_action.setEnabled(False)
+        self.tray_menu.addAction(self.tray_status_action)
+        self.tray_menu.addSeparator()
+        self.tray_toggle_action = self.tray_menu.addAction("", self.toggle_session)
         self.tray_menu.addAction("Открыть", self.show_window)
         self.tray_menu.addSeparator()
         self.tray_menu.addAction("Выход", self.quit_app)
         self.tray.setContextMenu(self.tray_menu)
         self.tray.activated.connect(self.on_tray_activated)
+        self.tray.show()
 
         app = QApplication.instance()
         # Windows спрашивает программы, можно ли выключаться (WM_QUERYENDSESSION).
@@ -96,9 +166,16 @@ class MainWindow(QMainWindow):
         app.aboutToQuit.connect(self.on_about_to_quit)
 
         self.refresh()
-        self.tray.show()
 
     # ---------- Сессия ----------
+
+    def selected_targets(self) -> list[Target]:
+        """Что очищать в новой сессии: всё, кроме снятых галочек.
+
+        Программы, которых на компьютере пока нет, тоже включены: если их
+        установят и запустят во время сессии, следы тоже удалятся.
+        """
+        return [t for t in self.session.targets if t.id not in self.settings.disabled_targets]
 
     def toggle_session(self) -> None:
         if self.session.is_active:
@@ -107,42 +184,56 @@ class MainWindow(QMainWindow):
             self.start_session()
 
     def start_session(self) -> None:
-        running = self.session.running_browsers()
+        targets = self.selected_targets()
+        try:
+            self.session.check_can_close(targets)
+        except SessionError as error:
+            QMessageBox.warning(self, APP_NAME, str(error))
+            return
+
+        running = self.session.running(targets)
         if running:
-            names = ", ".join(b.name for b in running)
+            names = ", ".join(t.name for t in running)
             answer = QMessageBox.question(
                 self,
-                "Нужно закрыть браузеры",
+                "Нужно закрыть программы",
                 f"Чтобы начать сессию, нужно закрыть: {names}.\n"
-                "Несохранённое на открытых вкладках пропадёт.\n\n"
+                "Несохранённое в них пропадёт.\n\n"
                 "Закрыть и начать сессию?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return
 
-        self.run_task("Сохраняю состояние браузеров…", self.session.start)
+        self.run_task("Сохраняю состояние…", lambda: self.session.start(targets, self.show_progress))
 
     def end_session(self, confirm: bool = True) -> bool:
         if confirm:
+            text = (
+                "Всё, что появилось за сессию (входы в аккаунты, пароли, история), "
+                "будет удалено."
+            )
+            running = self.session.running(self.session.session_targets())
+            if running:
+                names = ", ".join(t.name for t in running)
+                text += f"\n\nБудут закрыты: {names}. Несохранённое в них пропадёт."
             answer = QMessageBox.question(
                 self,
                 "Завершить сессию?",
-                "Браузеры будут закрыты, а всё, что появилось в них за сессию "
-                "(входы в аккаунты, пароли, история), будет удалено.",
+                text,
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return False
 
-        return self.run_task("Выхожу из аккаунтов…", self.session.end)
+        return self.run_task("Выхожу из аккаунтов…", lambda: self.session.end(self.show_progress))
 
     def run_task(self, text: str, task: Callable[[], None]) -> bool:
         """Выполнить долгую операцию, показывая, что программа занята."""
-        self.status_label.setText(text)
+        self.show_progress(text)
         self.toggle_button.setEnabled(False)
+        self.targets_box.setEnabled(False)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        QApplication.processEvents()
         try:
             task()
             return True
@@ -155,6 +246,10 @@ class MainWindow(QMainWindow):
             self.toggle_button.setEnabled(True)
             self.refresh()
 
+    def show_progress(self, text: str) -> None:
+        self.status_label.setText(_status_html(BLUE, text))
+        QApplication.processEvents()
+
     def recover_after_restart(self) -> None:
         """Вызвать при запуске: компьютер могли выключить посреди сессии."""
         if not self.session.computer_restarted_since_start():
@@ -166,7 +261,7 @@ class MainWindow(QMainWindow):
             return
 
         log.info("Компьютер выключился посреди сессии — выхожу из аккаунтов сейчас")
-        if self.run_task("Выхожу из аккаунтов…", self.session.end):
+        if self.end_session(confirm=False):
             QMessageBox.information(
                 self,
                 APP_NAME,
@@ -201,30 +296,33 @@ class MainWindow(QMainWindow):
         self.settings.save(self.settings_path)
         log.info("Выход при выключении: %s", "да" if checked else "нет")
 
+    def on_targets_changed(self) -> None:
+        self.settings.disabled_targets = [
+            target_id for target_id, checkbox in self.target_checkboxes.items()
+            if not checkbox.isChecked()
+        ]
+        self.settings.save(self.settings_path)
+
     # ---------- Окно и трей ----------
 
     def refresh(self) -> None:
-        """Обновить надписи и значок под текущее состояние сессии."""
+        """Обновить надписи под текущее состояние сессии."""
         if self.session.is_active:
             started = _format_time(self.session.started_at)
-            self.status_label.setText(f"Сессия активна с {started}")
+            status = f"Сессия активна с {started}"
+            self.status_label.setText(_status_html(GREEN, status))
             self.toggle_button.setText("Завершить сессию")
-            self.tray.setToolTip(f"{APP_NAME}: сессия активна с {started}")
+            self.tray_toggle_action.setText("Завершить сессию")
         else:
-            self.status_label.setText("Сессия не активна")
+            status = "Сессия не активна"
+            self.status_label.setText(_status_html(GRAY, status))
             self.toggle_button.setText("Начать сессию")
-            self.tray.setToolTip(f"{APP_NAME}: сессия не активна")
+            self.tray_toggle_action.setText("Начать сессию")
 
-        installed = self.session.installed_browsers()
-        if installed:
-            names = ", ".join(b.name for b in installed)
-            self.browsers_label.setText(f"Браузеры на этом компьютере: {names}")
-        else:
-            self.browsers_label.setText("Браузеры не найдены")
-
-        icon = make_icon(self.session.is_active)
-        self.setWindowIcon(icon)
-        self.tray.setIcon(icon)
+        # Во время сессии список не меняется: он был зафиксирован при старте.
+        self.targets_box.setEnabled(not self.session.is_active)
+        self.tray_status_action.setText(status)
+        self.tray.setToolTip(f"{APP_NAME}: {status.lower()}")
 
     def show_window(self) -> None:
         self.showNormal()
@@ -248,7 +346,7 @@ class MainWindow(QMainWindow):
                 self.tray.showMessage(
                     APP_NAME,
                     "Сессия продолжается. Программа работает здесь, в трее.",
-                    QSystemTrayIcon.MessageIcon.Information,
+                    make_icon(),
                 )
                 self._tray_hint_shown = True
         else:
@@ -281,22 +379,45 @@ class MainWindow(QMainWindow):
         QApplication.quit()
 
 
-def make_icon(active: bool) -> QIcon:
-    """Значок: зелёный кружок — сессия идёт, серый — нет."""
-    pixmap = QPixmap(64, 64)
+_icon: QIcon | None = None
+
+
+def make_icon() -> QIcon:
+    """Значок программы: голубой квадрат со скруглёнными углами и буквами SC."""
+    global _icon
+    if _icon is not None:
+        return _icon
+
+    size = 256
+    pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
 
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    gradient = QLinearGradient(0, 0, size, size)
+    gradient.setColorAt(0, QColor(BLUE_LIGHT))
+    gradient.setColorAt(1, QColor(BLUE_DARK))
     painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(QColor("#2e7d32" if active else "#8a8a8a"))
-    painter.drawEllipse(2, 2, 60, 60)
+    painter.setBrush(gradient)
+    painter.drawRoundedRect(QRectF(8, 8, size - 16, size - 16), 56, 56)
+
+    font = QFont("Segoe UI")
+    font.setBold(True)
+    font.setPixelSize(int(size * 0.42))
+    painter.setFont(font)
     painter.setPen(QColor("white"))
-    painter.setFont(QFont("Segoe UI", 20, QFont.Weight.Bold))
     painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "SC")
     painter.end()
 
-    return QIcon(pixmap)
+    _icon = QIcon(pixmap)
+    return _icon
+
+
+def _status_html(color: str, text: str) -> str:
+    return (
+        f'<span style="color:{color}; font-size:15pt;">●</span>'
+        f'&nbsp;<span style="font-size:12pt; font-weight:600;">{text}</span>'
+    )
 
 
 def _format_time(moment: datetime) -> str:
@@ -327,6 +448,8 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    app.setWindowIcon(make_icon())
+    app.setStyleSheet(STYLE)
     # Закрытие окна не должно завершать программу: она живёт в трее.
     app.setQuitOnLastWindowClosed(False)
 
@@ -340,7 +463,7 @@ def main() -> int:
 
     settings_path = home / "settings.json"
     settings = Settings.load(settings_path)
-    session = Session(home, known_browsers())
+    session = Session(home, known_targets())
     session.load()
 
     window = MainWindow(session, settings, settings_path)
