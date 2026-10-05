@@ -35,6 +35,9 @@ class Target:
     skip: tuple[str, ...] = ()
     # Значения реестра HKEY_CURRENT_USER: (раздел, имя значения).
     registry_values: tuple[tuple[str, str], ...] = ()
+    # Где обычно лежит exe программы — из него берём значок для окна.
+    # Не обязательно: значок ищется и по имени процесса (раздел реестра App Paths).
+    exe_paths: tuple[Path, ...] = ()
 
     def is_installed(self) -> bool:
         if self.kind == CREDENTIALS:
@@ -61,7 +64,7 @@ def known_targets() -> list[Target]:
         targets += _browsers(local, roaming)
         targets += _apps(local, roaming)
     if home and roaming:
-        targets.append(_git(home, roaming))
+        targets.append(_git(home, roaming, local))
     if sys.platform == "win32":
         targets.append(WINDOWS_CREDENTIALS)
     return targets
@@ -69,27 +72,41 @@ def known_targets() -> list[Target]:
 
 def _browsers(local: Path, roaming: Path) -> list[Target]:
     hint = "Входы на сайты, сохранённые пароли, история, закладки, расширения"
+    programs = _program_files()
 
-    def browser(id_, name, data_dir, process, exe_hint=""):
+    def browser(id_, name, data_dir, process, exe_hint="", exe_paths=()):
         return Target(id_, name, kind=BROWSER, hint=hint, paths=(data_dir,),
-                      process_names=(process,), exe_hint=exe_hint)
+                      process_names=(process,), exe_hint=exe_hint, exe_paths=tuple(exe_paths))
 
     return [
-        browser("chrome", "Google Chrome", local / "Google" / "Chrome" / "User Data", "chrome.exe"),
-        browser("edge", "Microsoft Edge", local / "Microsoft" / "Edge" / "User Data", "msedge.exe"),
+        browser("chrome", "Google Chrome", local / "Google" / "Chrome" / "User Data", "chrome.exe",
+                exe_paths=[d / "Google" / "Chrome" / "Application" / "chrome.exe"
+                           for d in (local, *programs)]),
+        browser("edge", "Microsoft Edge", local / "Microsoft" / "Edge" / "User Data", "msedge.exe",
+                exe_paths=[d / "Microsoft" / "Edge" / "Application" / "msedge.exe"
+                           for d in programs]),
         browser("yandex", "Яндекс Браузер", local / "Yandex" / "YandexBrowser" / "User Data",
-                "browser.exe", exe_hint="yandex"),
+                "browser.exe", exe_hint="yandex",
+                exe_paths=[d / "Yandex" / "YandexBrowser" / "Application" / "browser.exe"
+                           for d in (local, *programs)]),
         browser("brave", "Brave", local / "BraveSoftware" / "Brave-Browser" / "User Data",
-                "brave.exe"),
-        browser("vivaldi", "Vivaldi", local / "Vivaldi" / "User Data", "vivaldi.exe"),
-        browser("opera", "Opera", roaming / "Opera Software" / "Opera Stable", "opera.exe"),
+                "brave.exe",
+                exe_paths=[d / "BraveSoftware" / "Brave-Browser" / "Application" / "brave.exe"
+                           for d in (local, *programs)]),
+        browser("vivaldi", "Vivaldi", local / "Vivaldi" / "User Data", "vivaldi.exe",
+                exe_paths=[d / "Vivaldi" / "Application" / "vivaldi.exe"
+                           for d in (local, *programs)]),
+        browser("opera", "Opera", roaming / "Opera Software" / "Opera Stable", "opera.exe",
+                exe_paths=[local / "Programs" / "Opera" / "opera.exe"]),
         browser("opera_gx", "Opera GX", roaming / "Opera Software" / "Opera GX Stable",
-                "opera.exe"),
-        browser("firefox", "Mozilla Firefox", roaming / "Mozilla" / "Firefox", "firefox.exe"),
+                "opera.exe", exe_paths=[local / "Programs" / "Opera GX" / "opera.exe"]),
+        browser("firefox", "Mozilla Firefox", roaming / "Mozilla" / "Firefox", "firefox.exe",
+                exe_paths=[d / "Mozilla Firefox" / "firefox.exe" for d in programs]),
     ]
 
 
 def _apps(local: Path, roaming: Path) -> list[Target]:
+    programs = _program_files()
     apps = [
         Target(
             "telegram", "Telegram",
@@ -101,6 +118,7 @@ def _apps(local: Path, roaming: Path) -> list[Target]:
                 / "LocalCache" / "Roaming" / "Telegram Desktop UWP" / "tdata",
             ),
             process_names=("Telegram.exe",),
+            exe_paths=(roaming / "Telegram Desktop" / "Telegram.exe",),
             # user_data — кэш картинок и файлов из чатов, emoji — наборы эмодзи
             skip=("user_data*", "emoji", "dumps"),
         ),
@@ -109,6 +127,7 @@ def _apps(local: Path, roaming: Path) -> list[Target]:
             hint="Вход в Discord",
             paths=(roaming / "discord", roaming / "discordptb", roaming / "discordcanary"),
             process_names=("Discord.exe", "DiscordPTB.exe", "DiscordCanary.exe"),
+            exe_paths=_newest(local / "Discord", "app-*/Discord.exe"),
         ),
         Target(
             "vscode", "VS Code",
@@ -116,6 +135,8 @@ def _apps(local: Path, roaming: Path) -> list[Target]:
                  "Несохранённые файлы в VS Code пропадут.",
             paths=(roaming / "Code",),
             process_names=("Code.exe",),
+            exe_paths=tuple(d / "Microsoft VS Code" / "Code.exe"
+                            for d in (local / "Programs", *programs)),
             skip=("CachedData", "CachedExtensionVSIXs", "CachedProfilesData", "logs"),
         ),
     ]
@@ -131,6 +152,7 @@ def _apps(local: Path, roaming: Path) -> list[Target]:
                 local / "Steam",  # токены входа (local.vdf) и встроенный браузер Steam
             ),
             process_names=("steam.exe", "steamwebhelper.exe"),
+            exe_paths=(steam_dir / "steam.exe",),
             registry_values=(
                 (r"Software\Valve\Steam", "AutoLoginUser"),
                 (r"Software\Valve\Steam", "RememberPassword"),
@@ -140,7 +162,8 @@ def _apps(local: Path, roaming: Path) -> list[Target]:
     return apps
 
 
-def _git(home: Path, roaming: Path) -> Target:
+def _git(home: Path, roaming: Path, local: Path | None) -> Target:
+    desktop = (local / "GitHubDesktop" / "GitHubDesktop.exe",) if local else ()
     return Target(
         "git", "Git и GitHub",
         hint="Настройки Git (имя, почта), SSH-ключи,\n"
@@ -153,6 +176,7 @@ def _git(home: Path, roaming: Path) -> Target:
             roaming / "GitHub Desktop",
         ),
         process_names=("GitHubDesktop.exe",),
+        exe_paths=(*desktop, *(d / "Git" / "git-bash.exe" for d in _program_files())),
     )
 
 
@@ -164,6 +188,18 @@ def _steam_dir() -> Path | None:
     if program_files and (Path(program_files) / "Steam").is_dir():
         return Path(program_files) / "Steam"
     return None
+
+
+def _program_files() -> tuple[Path, ...]:
+    """Program Files и Program Files (x86) — там, где они есть."""
+    names = ("ProgramFiles", "ProgramFiles(x86)")
+    return tuple(dict.fromkeys(d for d in map(_env_dir, names) if d))
+
+
+def _newest(folder: Path, pattern: str) -> tuple[Path, ...]:
+    """Самый новый exe из папок с версиями, например Discord\\app-1.0.9258."""
+    found = sorted(folder.glob(pattern)) if folder.is_dir() else []
+    return tuple(found[-1:])
 
 
 def _env_dir(name: str) -> Path | None:

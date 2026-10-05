@@ -15,6 +15,8 @@ class Settings:
     # Программы, с которых пользователь снял галочку в списке «Что очищать».
     # Храним именно выключенные, чтобы новые программы по умолчанию были включены.
     disabled_targets: list[str] = field(default_factory=list)
+    # Тема окна: "system" (как в Windows), "light" или "dark".
+    theme: str = "system"
 
     @classmethod
     def load(cls, path: Path) -> "Settings":

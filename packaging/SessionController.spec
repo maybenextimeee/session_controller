@@ -45,9 +45,14 @@ def version_info():
     )
 
 
+# Необязательные шрифты интерфейса (session_controller/resources/fonts, см. theme.py).
+RESOURCES = ROOT / "session_controller" / "resources"
+datas = [(str(RESOURCES), "session_controller/resources")] if RESOURCES.is_dir() else []
+
 a = Analysis(
     [str(ROOT / "packaging" / "entry.py")],
     pathex=[str(ROOT)],
+    datas=datas,
     excludes=["tkinter"],
 )
 pyz = PYZ(a.pure)
