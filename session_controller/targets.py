@@ -62,7 +62,7 @@ def known_targets() -> list[Target]:
     targets: list[Target] = []
     if local and roaming:
         targets += _browsers(local, roaming)
-        targets += _apps(local, roaming)
+        targets += _apps(local, roaming, home)
     if home and roaming:
         targets.append(_git(home, roaming, local))
     if sys.platform == "win32":
@@ -105,8 +105,11 @@ def _browsers(local: Path, roaming: Path) -> list[Target]:
     ]
 
 
-def _apps(local: Path, roaming: Path) -> list[Target]:
+def _apps(local: Path, roaming: Path, home: Path | None) -> list[Target]:
     programs = _program_files()
+    # С версии 1.118 VS Code хранит общие данные, в том числе входы в аккаунты
+    # (GitHub, Microsoft), не в %APPDATA%\Code, а в ~\.vscode-shared.
+    vscode_shared = (home / ".vscode-shared",) if home else ()
     apps = [
         Target(
             "telegram", "Telegram",
@@ -133,7 +136,7 @@ def _apps(local: Path, roaming: Path) -> list[Target]:
             "vscode", "VS Code",
             hint="Вход в GitHub / Microsoft в VS Code, настройки, история.\n"
                  "Несохранённые файлы в VS Code пропадут.",
-            paths=(roaming / "Code",),
+            paths=(roaming / "Code", *vscode_shared),
             process_names=("Code.exe",),
             exe_paths=tuple(d / "Microsoft VS Code" / "Code.exe"
                             for d in (local / "Programs", *programs)),

@@ -11,7 +11,7 @@ from session_controller import credentials, processes, registry, snapshot
 from session_controller import session as session_mod
 from session_controller.session import Session, SessionError
 from session_controller.settings import Settings
-from session_controller.targets import BROWSER, CREDENTIALS, Target
+from session_controller.targets import BROWSER, CREDENTIALS, Target, known_targets
 
 NO_PROCESS = ("sc-test-no-such-process.exe",)
 
@@ -269,3 +269,12 @@ def test_launched_from_detects_parent_process():
     assert processes.launched_from([unrelated, target]) == target
     assert processes.launched_from([unrelated]) is None
     assert processes.running([unrelated, target]) == [target]
+
+
+def test_vscode_target_includes_shared_storage(tmp_path, monkeypatch):
+    """VS Code 1.118+ хранит входы в аккаунты в ~/.vscode-shared — его тоже нужно откатывать."""
+    for name in ("LOCALAPPDATA", "APPDATA", "USERPROFILE"):
+        monkeypatch.setenv(name, str(tmp_path / name))
+    vscode = next(t for t in known_targets() if t.id == "vscode")
+    assert tmp_path / "APPDATA" / "Code" in vscode.paths
+    assert tmp_path / "USERPROFILE" / ".vscode-shared" in vscode.paths

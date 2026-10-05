@@ -9,18 +9,16 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from PySide6.QtCore import QLockFile, Qt, QTimer, QUrl
-from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices
+from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QIcon
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
     QApplication,
-    QButtonGroup,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMenu,
-    QMessageBox,
     QPushButton,
     QStackedWidget,
     QSystemTrayIcon,
@@ -29,14 +27,25 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from session_controller import __version__, autostart, theme
+from session_controller import __version__, autostart, dialogs, theme
 from session_controller.icons import make_icon, target_icon
 from session_controller.paths import app_home
 from session_controller.session import Session, SessionError
 from session_controller.settings import Settings
 from session_controller.targets import Target, known_targets
-from session_controller.widgets import Background, SettingRow, StatusPill, TargetCard
-from session_controller.winapi import block_shutdown, create_app_mutex, unblock_shutdown
+from session_controller.widgets import (
+    Background,
+    Segmented,
+    SettingRow,
+    StatusPill,
+    TargetCard,
+)
+from session_controller.winapi import (
+    block_shutdown,
+    create_app_mutex,
+    redraw_title_bar,
+    unblock_shutdown,
+)
 
 log = logging.getLogger(__name__)
 
@@ -141,8 +150,8 @@ class MainWindow(QMainWindow):
         logo.setPixmap(make_icon().pixmap(40, 40))
         title = QLabel(APP_NAME)
         title.setObjectName("appTitle")
-        subtitle = QLabel(f"v{__version__}  ·  выход из всех аккаунтов")
-        subtitle.setObjectName("mono")
+        subtitle = QLabel("Выход из всех аккаунтов одной кнопкой")
+        subtitle.setObjectName("small")
         title_box = QVBoxLayout()
         title_box.setSpacing(1)
         title_box.addWidget(title)
@@ -154,8 +163,18 @@ class MainWindow(QMainWindow):
         header.addLayout(title_box, 1)
         header.addWidget(settings_button)
 
-        # Карточка сессии: статус, пояснение, главная кнопка.
+        # Карточка сессии: статус, крупный заголовок (во время сессии — таймер),
+        # пояснение и главная кнопка.
         self.status_pill = StatusPill()
+        self.started_label = QLabel()
+        self.started_label.setObjectName("small")
+        status_row = QHBoxLayout()
+        status_row.addWidget(self.status_pill)
+        status_row.addStretch(1)
+        status_row.addWidget(self.started_label)
+
+        self.headline = QLabel()
+        self.headline.setObjectName("headline")
         self.hero_text = QLabel()
         self.hero_text.setObjectName("muted")
         self.hero_text.setWordWrap(True)
@@ -165,18 +184,21 @@ class MainWindow(QMainWindow):
         self.toggle_button.clicked.connect(self.toggle_session)
 
         hero = QFrame()
-        hero.setObjectName("hero")
+        hero.setObjectName("panel")
         hero_layout = QVBoxLayout(hero)
-        hero_layout.setContentsMargins(18, 16, 18, 18)
-        hero_layout.setSpacing(12)
-        hero_layout.addWidget(self.status_pill, 0, Qt.AlignmentFlag.AlignLeft)
+        hero_layout.setContentsMargins(20, 18, 20, 20)
+        hero_layout.setSpacing(0)
+        hero_layout.addLayout(status_row)
+        hero_layout.addSpacing(14)
+        hero_layout.addWidget(self.headline)
+        hero_layout.addSpacing(4)
         hero_layout.addWidget(self.hero_text)
-        hero_layout.addSpacing(2)
+        hero_layout.addSpacing(18)
         hero_layout.addWidget(self.toggle_button)
 
         # Что очищать.
         self.targets_counter = QLabel()
-        self.targets_counter.setObjectName("mono")
+        self.targets_counter.setObjectName("counter")
         targets_header = QHBoxLayout()
         targets_header.addWidget(_section_label("Что очищать"))
         targets_header.addStretch(1)
@@ -210,7 +232,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(header)
         layout.addSpacing(20)
         layout.addWidget(hero)
-        layout.addSpacing(24)
+        layout.addSpacing(22)
         layout.addLayout(targets_header)
         layout.addSpacing(10)
         layout.addLayout(targets_grid)
@@ -228,28 +250,23 @@ class MainWindow(QMainWindow):
         header.addWidget(title, 1)
 
         # Оформление.
-        self.theme_buttons = QButtonGroup(self)
-        theme_row = QHBoxLayout()
-        theme_row.setSpacing(6)
-        for choice, label in theme.CHOICES.items():
-            button = QPushButton(label)
-            button.setObjectName("segment")
-            button.setCheckable(True)
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.setChecked(choice == self.themes.choice)
-            button.clicked.connect(lambda _checked, c=choice: self.on_theme_chosen(c))
-            self.theme_buttons.addButton(button)
-            theme_row.addWidget(button)
-        theme_row.addStretch(1)
         theme_title = QLabel("Тема")
         theme_title.setObjectName("cardTitle")
+        theme_hint = QLabel("При первом запуске — как в Windows")
+        theme_hint.setObjectName("small")
+        theme_texts = QVBoxLayout()
+        theme_texts.setSpacing(3)
+        theme_texts.addWidget(theme_title)
+        theme_texts.addWidget(theme_hint)
+        self.theme_picker = Segmented(theme.CHOICES, self.themes.choice)
+        self.theme_picker.chosen.connect(self.on_theme_chosen)
         theme_card = QFrame()
-        theme_card.setObjectName("hero")
+        theme_card.setObjectName("panel")
         theme_layout = QVBoxLayout(theme_card)
-        theme_layout.setContentsMargins(16, 12, 16, 14)
-        theme_layout.setSpacing(10)
-        theme_layout.addWidget(theme_title)
-        theme_layout.addLayout(theme_row)
+        theme_layout.setContentsMargins(16, 13, 16, 14)
+        theme_layout.setSpacing(12)
+        theme_layout.addLayout(theme_texts)
+        theme_layout.addWidget(self.theme_picker)
 
         # Сессия.
         self.shutdown_row = SettingRow(
@@ -276,11 +293,16 @@ class MainWindow(QMainWindow):
 
         # О программе.
         about = QFrame()
-        about.setObjectName("hero")
+        about.setObjectName("panel")
         about_layout = QHBoxLayout(about)
-        about_layout.setContentsMargins(16, 12, 16, 12)
-        version = QLabel(f"{APP_NAME} {__version__}")
+        about_layout.setContentsMargins(16, 13, 16, 13)
+        about_icon = QLabel()
+        about_icon.setFixedSize(22, 22)
+        about_icon.setPixmap(make_icon().pixmap(22, 22))
+        version = QLabel(f"Версия {__version__}")
         version.setObjectName("cardTitle")
+        about_layout.addWidget(about_icon)
+        about_layout.addSpacing(6)
         about_layout.addWidget(version, 1)
         for text, handler in (
             ("GitHub ↗", lambda: QDesktopServices.openUrl(QUrl(REPO_URL))),
@@ -337,47 +359,53 @@ class MainWindow(QMainWindow):
         else:
             self.start_session()
 
+    def has_selection(self) -> bool:
+        """Включена ли хотя бы одна программа в списке «Что очищать»."""
+        return any(card.switch.isChecked() for card in self.target_cards.values())
+
     def start_session(self) -> None:
+        # Кнопка в этом случае неактивна, но начать можно и из меню в трее.
+        if not self.has_selection():
+            return
         targets = self.selected_targets()
         try:
             self.session.check_can_close(targets)
         except SessionError as error:
-            QMessageBox.warning(self, APP_NAME, str(error))
+            dialogs.inform(self, "Не получится начать сессию", str(error),
+                           dialogs.WARNING, dialogs.CAUTION)
             return
 
         running = self.session.running(targets)
-        if running:
-            names = ", ".join(t.name for t in running)
-            answer = QMessageBox.question(
-                self,
-                "Нужно закрыть программы",
-                f"Чтобы начать сессию, нужно закрыть: {names}.\n"
-                "Несохранённое в них пропадёт.\n\n"
-                "Закрыть и начать сессию?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                return
+        if running and not dialogs.confirm(
+            self,
+            "Нужно закрыть программы",
+            "Чтобы запомнить, как всё было до тебя, эти программы нужно закрыть. "
+            "Несохранённое в них пропадёт.",
+            "Закрыть и начать",
+            dialogs.WARNING,
+            dialogs.CAUTION,
+            items=self._program_items(running),
+            items_title="Будут закрыты",
+        ):
+            return
 
         self.run_task("Сохраняю состояние…", lambda: self.session.start(targets, self.show_progress))
 
     def end_session(self, confirm: bool = True) -> bool:
         if confirm:
-            text = (
-                "Всё, что появилось за сессию (входы в аккаунты, пароли, история), "
-                "будет удалено."
-            )
+            text = "Всё, что появилось за сессию, — входы в аккаунты, пароли, история — исчезнет."
             running = self.session.running(self.session.session_targets())
             if running:
-                names = ", ".join(t.name for t in running)
-                text += f"\n\nБудут закрыты: {names}. Несохранённое в них пропадёт."
-            answer = QMessageBox.question(
+                text += " Открытые программы закроются, несохранённое в них пропадёт."
+            if not dialogs.confirm(
                 self,
                 "Завершить сессию?",
                 text,
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            )
-            if answer != QMessageBox.StandardButton.Yes:
+                "Завершить сессию",
+                dialogs.SIGN_OUT,
+                items=self._program_items(running),
+                items_title="Будут закрыты",
+            ):
                 return False
 
         return self.run_task("Выхожу из аккаунтов…", lambda: self.session.end(self.show_progress))
@@ -394,16 +422,17 @@ class MainWindow(QMainWindow):
             return True
         except Exception as error:
             log.exception("Ошибка при выполнении: %s", text)
-            QMessageBox.critical(self, APP_NAME, str(error))
+            dialogs.inform(self, "Что-то пошло не так", str(error), dialogs.ERROR, dialogs.DANGER)
             return False
         finally:
             QApplication.restoreOverrideCursor()
-            self.toggle_button.setEnabled(True)
             self._busy = False
             self.refresh()
 
     def show_progress(self, text: str) -> None:
-        self.status_pill.set_status(theme.current().accent, text)
+        self.status_pill.set_status(theme.current().busy, "Подожди")
+        self.started_label.setText("")
+        self.headline.setText(text)
         QApplication.processEvents()
 
     def recover_after_restart(self) -> None:
@@ -418,11 +447,12 @@ class MainWindow(QMainWindow):
 
         log.info("Компьютер выключился посреди сессии — выхожу из аккаунтов сейчас")
         if self.end_session(confirm=False):
-            QMessageBox.information(
+            dialogs.inform(
                 self,
-                APP_NAME,
+                "Выход из аккаунтов выполнен",
                 "Компьютер выключился во время сессии, и программа не успела выйти "
-                "из аккаунтов. Выход выполнен сейчас.",
+                "из аккаунтов. Сделала это сейчас — всё как было до сессии.",
+                dialogs.RESTORED,
             )
 
     def on_system_shutdown(self, _manager=None) -> None:
@@ -460,7 +490,8 @@ class MainWindow(QMainWindow):
             autostart.set_enabled(checked)
         except OSError as error:
             log.exception("Не удалось изменить автозапуск")
-            QMessageBox.warning(self, APP_NAME, f"Не удалось изменить автозапуск: {error}")
+            dialogs.inform(self, "Не удалось изменить автозапуск", str(error),
+                           dialogs.ERROR, dialogs.DANGER)
             return
         log.info("Автозапуск: %s", "да" if checked else "нет")
 
@@ -475,6 +506,10 @@ class MainWindow(QMainWindow):
         self.refresh()
         for widget in self.findChildren(QWidget):
             widget.update()
+        # Заголовок окна рисует Windows, и сам он не обновится до сворачивания.
+        # Qt меняет его цвет не мгновенно, поэтому перерисовываем чуть позже.
+        if self.isVisible():
+            QTimer.singleShot(50, lambda: redraw_title_bar(int(self.winId())))
 
     def open_app_folder(self) -> None:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.session.home)))
@@ -506,10 +541,10 @@ class MainWindow(QMainWindow):
         active = self.session.is_active
         if active:
             started = _format_time(self.session.started_at)
-            duration = _format_duration(datetime.now() - self.session.started_at)
-            status = f"Сессия идёт · {duration}"
-            self.status_pill.set_status(t.green, status)
-            text = f"Все входы в аккаунты с {started} удалятся, когда ты завершишь сессию"
+            self.status_pill.set_status(t.accent, "Идёт сессия", pulsing=True)
+            self.started_label.setText(f"начата в {started}")
+            self.headline.setText(_format_duration(datetime.now() - self.session.started_at))
+            text = "Все входы в аккаунты исчезнут с компьютера, когда ты завершишь сессию"
             if self.settings.logout_on_shutdown:
                 text += " или выключишь компьютер"
             self.hero_text.setText(text + ".")
@@ -517,17 +552,31 @@ class MainWindow(QMainWindow):
             self.tray_toggle_action.setText("Завершить сессию")
             tray_status = f"Сессия идёт с {started}"
         else:
-            status = "Сессия не активна"
-            self.status_pill.set_status(t.dim, status)
-            self.hero_text.setText(
-                "Начни сессию и работай как обычно: входи в аккаунты, закрывай и открывай "
-                "программы. В конце одна кнопка — и на компьютере не останется твоих входов."
-            )
+            self.status_pill.set_status(t.dim, "Не активна")
+            self.started_label.setText("")
+            if self.has_selection():
+                self.headline.setText("Готов к работе")
+                self.hero_text.setText(
+                    "Начни сессию и работай как обычно. В конце одна кнопка вернёт компьютер "
+                    "к тому, каким он был до тебя, — без твоих аккаунтов."
+                )
+            else:
+                self.headline.setText("Нечего очищать")
+                self.hero_text.setText(
+                    "Включи хотя бы одну программу в списке ниже — тогда можно будет "
+                    "начать сессию."
+                )
             self.toggle_button.setText("Начать сессию")
             self.tray_toggle_action.setText("Начать сессию")
-            tray_status = status
+            tray_status = "Сессия не активна"
 
         # Главная кнопка: градиент — начать, контрастная — завершить.
+        # Начать нельзя, пока не выбрана ни одна программа.
+        can_toggle = active or self.has_selection()
+        self.toggle_button.setEnabled(can_toggle)
+        self.toggle_button.setCursor(Qt.CursorShape.PointingHandCursor if can_toggle
+                                     else Qt.CursorShape.ForbiddenCursor)
+        self.tray_toggle_action.setEnabled(can_toggle)
         self.toggle_button.setProperty("inverse", active)
         self.toggle_button.style().unpolish(self.toggle_button)
         self.toggle_button.style().polish(self.toggle_button)
@@ -536,12 +585,17 @@ class MainWindow(QMainWindow):
         self._set_targets_enabled(not active)
         enabled = sum(card.switch.isChecked() for card in self.target_cards.values())
         if active:
-            self.targets_counter.setText("зафиксировано на время сессии")
+            self.targets_counter.setText("до конца сессии")
         else:
             self.targets_counter.setText(f"{enabled} из {len(self.target_cards)}")
 
         self.tray_status_action.setText(tray_status)
         self.tray.setToolTip(f"{APP_NAME}: {tray_status.lower()}")
+
+    def _program_items(self, targets: list[Target]) -> list[tuple[QIcon, str]]:
+        """Значки и названия программ — для списка в окне-вопросе."""
+        icon_font = theme.fonts().icons
+        return [(target_icon(t, icon_font), t.name) for t in targets]
 
     def _set_targets_enabled(self, enabled: bool) -> None:
         for card in self.target_cards.values():
@@ -577,24 +631,24 @@ class MainWindow(QMainWindow):
 
     def quit_app(self) -> None:
         if self.session.is_active:
-            box = QMessageBox(self)
-            box.setIcon(QMessageBox.Icon.Question)
-            box.setWindowTitle("Сессия ещё идёт")
-            box.setText("Завершить сессию перед выходом?")
-            box.setInformativeText(
-                "Если не завершать, твои аккаунты останутся на компьютере, а выход "
-                "при выключении не сработает, пока Session Controller закрыт."
+            box = dialogs.Dialog(
+                self,
+                "Сессия ещё идёт",
+                "Завершить её перед выходом? Если нет, твои аккаунты останутся на "
+                "компьютере, а выход при выключении не сработает, пока программа закрыта.",
+                [
+                    dialogs.Button("cancel", "Отмена"),
+                    dialogs.Button("keep", "Просто выйти"),
+                    dialogs.Button("end", "Завершить и выйти", dialogs.PRIMARY),
+                ],
+                dialogs.POWER,
+                dialogs.CAUTION,
             )
-            end_button = box.addButton("Завершить и выйти", QMessageBox.ButtonRole.YesRole)
-            keep_button = box.addButton("Выйти без завершения", QMessageBox.ButtonRole.NoRole)
-            box.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
             box.exec()
-
-            clicked = box.clickedButton()
-            if clicked == end_button:
+            if box.choice == "end":
                 if not self.end_session(confirm=False):
                     return
-            elif clicked != keep_button:
+            elif box.choice != "keep":
                 return
 
         self._user_quit = True
@@ -603,9 +657,9 @@ class MainWindow(QMainWindow):
 
 
 def _section_label(text: str) -> QLabel:
-    """Подпись раздела, как «BACKEND» на сайте: моноширинный шрифт, капс."""
+    """Подпись раздела: мелкий капс с разрядкой."""
     label = QLabel(text.upper())
-    label.setObjectName("section")
+    label.setObjectName("caps")
     return label
 
 
@@ -678,22 +732,25 @@ def _run(home: Path, minimized: bool, smoke_test: bool) -> int:
     # Закрытие окна не должно завершать программу: она живёт в трее.
     app.setQuitOnLastWindowClosed(False)
 
+    settings_path = home / "settings.json"
+    settings = Settings.load(settings_path)
+    # При первом запуске тема «как в системе», дальше — как выбрал пользователь.
+    themes = theme.ThemeManager(app, settings.theme)
+
     # Две копии программы одновременно будут мешать друг другу.
     lock = QLockFile(str(home / "app.lock"))
     if not lock.tryLock(100):
         if not _show_running_instance():
-            QMessageBox.information(
-                None, APP_NAME, "Session Controller уже запущен — его значок в трее, возле часов."
+            dialogs.inform(
+                None,
+                "Session Controller уже запущен",
+                "Его значок — в трее, возле часов. Нажми на него, чтобы открыть окно.",
             )
         return 0
     create_app_mutex(APP_MUTEX)
     if autostart.is_supported():
         autostart.refresh_path()
 
-    settings_path = home / "settings.json"
-    settings = Settings.load(settings_path)
-    # При первом запуске тема «как в системе», дальше — как выбрал пользователь.
-    themes = theme.ThemeManager(app, settings.theme)
     session = Session(home, known_targets())
     session.load()
 
