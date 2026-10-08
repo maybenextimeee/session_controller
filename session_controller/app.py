@@ -83,8 +83,9 @@ WINDOW_MARGINS = (22, 18, 22, 22)  # слева, сверху, справа, с�
 # (бледными), чтобы было видно, что ещё умеет Session Controller.
 MIN_GRID_CARDS = 6
 # В каком порядке добирать: сначала самые нужные в аудитории.
-FILLER_ORDER = ("telegram", "steam", "discord", "vscode", "git", "claude", "chatgpt",
-                "happ", "v2raytun", "hiddify", "chrome", "firefox", "yandex", "edge")
+FILLER_ORDER = ("telegram", "steam", "discord", "vscode", "git", "claude", "claude_code",
+                "chatgpt", "codex", "happ", "v2raytun", "hiddify", "chrome", "firefox",
+                "yandex", "edge")
 
 
 class MainWindow(QMainWindow):

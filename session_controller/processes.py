@@ -72,7 +72,7 @@ def _find(targets: Iterable[Target]) -> dict[str, list[psutil.Process]]:
         for target in targets:
             if name not in (n.lower() for n in target.process_names):
                 continue
-            if target.exe_hint and target.exe_hint.lower() not in exe:
+            if not target.matches_exe(exe):
                 continue
             found.setdefault(target.id, []).append(proc)
     return found

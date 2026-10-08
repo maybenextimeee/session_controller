@@ -39,9 +39,15 @@ _MONOGRAMS = {
     "hiddify": ("#4b6bfb", "H"),
     "clash_verge": ("#5b5bd6", "C"),
     "claude": ("#d97757", "C"),
-    "chatgpt": ("#10a37f", "AI"),
+    "claude_code": ("#d97757", "CLI"),
+    "chatgpt": ("#10a37f", "GPT"),
+    "codex": ("#202123", "Cx"),
     "cursor": ("#1f1f1f", "Cu"),
 }
+
+# Этим программам всегда рисуем плашку с буквами, даже если exe нашёлся:
+# у Claude Code значок как у приложения Claude — подпись «CLI» их различает.
+_LETTERS_ONLY = {"claude_code"}
 
 # Значок «ключ» из шрифта значков Windows (Segoe MDL2 Assets / Segoe Fluent Icons).
 _KEY_GLYPH = "\ue8d7"
@@ -55,7 +61,7 @@ def target_icon(target: Target, icon_font: str = "") -> QIcon:
     if target.id in _cache:
         return _cache[target.id]
 
-    exe = _find_exe(target)
+    exe = None if target.id in _LETTERS_ONLY else _find_exe(target)
     icon = QFileIconProvider().icon(QFileInfo(str(exe))) if exe else QIcon()
     if icon.isNull():
         if target.id == "windows_credentials" and icon_font:
@@ -73,7 +79,7 @@ def _find_exe(target: Target) -> Path | None:
             return path
     for process in target.process_names:
         path = _app_path(process)
-        if path and (not target.exe_hint or target.exe_hint in str(path).lower()):
+        if path and target.matches_exe(str(path)):
             return path
     return None
 

@@ -75,8 +75,10 @@ Session Controller решает это так:
 | v2RayTun | `%APPDATA%\v2RayTun.net`, текущее подключение `C:\Temp\v2RayTun\connection.json` и `tunnel.json` |
 | Hiddify | `%APPDATA%\Hiddify` |
 | Clash Verge | `%APPDATA%` и `%LOCALAPPDATA%\io.github.clash-verge-rev.clash-verge-rev` |
-| Claude | данные приложения из Microsoft Store `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude` (и `%APPDATA%\Claude` у старой версии), Claude Code: `~\.claude`, `~\.claude.json` |
-| ChatGPT и Codex | `%LOCALAPPDATA%\Packages\OpenAI.ChatGPT-Desktop_*` (`LocalCache`, `LocalState`), `~\.codex` |
+| Claude for Desktop | данные приложения из Microsoft Store `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude` (и `%APPDATA%\Claude` у старой версии) |
+| Claude Code | `~\.claude`, `~\.claude.json` |
+| ChatGPT | `%LOCALAPPDATA%\Packages\OpenAI.ChatGPT-Desktop_*` (`LocalCache`, `LocalState`) |
+| Codex | `~\.codex` (и приложение, и консольная версия), данные пакета `OpenAI.Codex_*`, если он есть |
 | Cursor | `%APPDATA%\Cursor` |
 
 У всех VPN-клиентов вместе с их папками откатываются настройки прокси Windows
@@ -202,7 +204,8 @@ tests/
 - ✅ Список программ: найденные — в окне, все поддерживаемые — в панели поверх окна.
   Steam под защитой, даже если его ещё не установили.
 - ✅ VPN-клиенты (Happ, v2RayTun, Hiddify, Clash Verge) и ИИ-клиенты (Claude,
-  ChatGPT и Codex, Cursor). Окно больше, главная страница прокручивается.
+  Claude Code, ChatGPT, Codex, Cursor) — каждая программа отдельной карточкой.
+  Окно больше, главная страница прокручивается.
 - ✅ Минималистичная главная: одна кнопка сессии внизу окна, всё о сессии написано
   на ней (сколько идёт, с какого времени, что сейчас очищается). Плавное открытие
   панели «Все программы», плавная прокрутка колёсиком, значок в шапке пружинит

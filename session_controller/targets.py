@@ -46,6 +46,7 @@ class Target:
     process_names: tuple[str, ...] = ()
     # Если имя процесса слишком общее (у Яндекса это browser.exe),
     # дополнительно проверяем, что этот кусок есть в пути к exe.
+    # Несколько вариантов — через «|» (см. matches_exe).
     exe_hint: str = ""
     # Что не копировать (кэш): шаблоны имён файлов и папок, например "user_data*".
     skip: tuple[str, ...] = ()
@@ -59,6 +60,13 @@ class Target:
         if self.kind == CREDENTIALS:
             return sys.platform == "win32"
         return any(path.exists() for path in self.paths)
+
+    def matches_exe(self, exe_path: str) -> bool:
+        """Подходит ли путь к exe под exe_hint (без учёта регистра)."""
+        if not self.exe_hint:
+            return True
+        exe_path = exe_path.lower()
+        return any(hint in exe_path for hint in self.exe_hint.lower().split("|"))
 
 
 WINDOWS_CREDENTIALS = Target(
@@ -252,22 +260,23 @@ def _vpn(local: Path, roaming: Path, home: Path | None) -> list[Target]:
 
 def _ai(local: Path, roaming: Path, home: Path | None) -> list[Target]:
     vscode_cache = ("CachedData", "CachedExtensionVSIXs", "CachedProfilesData", "logs")
-    claude_cli = (home / ".claude", home / ".claude.json") if home else ()
+    claude_code_home = (home / ".claude", home / ".claude.json") if home else ()
     codex_home = (home / ".codex",) if home else ()
     return [
         Target(
-            "claude", "Claude", kind=AI,
-            hint="Вход в Claude (приложение и Claude Code), чаты, настройки.\n"
-                 "Встроенный Claude Code приложение скачает заново.",
+            "claude", "Claude for Desktop", kind=AI,
+            hint="Вход в приложение Claude, чаты, настройки.\n"
+                 "Встроенный в приложение Claude Code оно скачает заново.",
             paths=(
                 # Версия из Microsoft Store хранит данные внутри своего пакета.
                 *(d / "LocalCache" / "Roaming" / "Claude"
                   for d in _store_data(local, "Claude", "Claude_pzs8sxrjxfjjc")),
                 roaming / "Claude",
-                *claude_cli,
             ),
-            # Закрываем и приложение, и Claude Code: оба пишут в ~\.claude.
             process_names=("claude.exe",),
+            # claude.exe — и у приложения, и у Claude Code; приложение узнаём по
+            # пакету из Microsoft Store или по папке старой версии.
+            exe_hint="pzs8sxrjxfjjc|anthropicclaude",
             # Встроенная копия Claude Code весит сотни мегабайт, входов в ней нет.
             skip=("claude-code", "vm_bundles", "logs"),
             exe_paths=(
@@ -276,21 +285,44 @@ def _ai(local: Path, roaming: Path, home: Path | None) -> list[Target]:
             ),
         ),
         Target(
-            "chatgpt", "ChatGPT и Codex", kind=AI,
-            hint="Вход в ChatGPT и Codex, история и настройки",
-            paths=(
-                *(d / part
-                  for d in _store_data(local, "OpenAI.ChatGPT-Desktop",
-                                       "OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0")
-                  for part in ("LocalCache", "LocalState")),
-                # Codex (и приложение, и консольная версия) хранит вход здесь.
-                *codex_home,
+            "claude_code", "Claude Code", kind=AI,
+            hint="Вход в Claude Code, история чатов, настройки и память.\n"
+                 "Закрывает и Claude Code внутри приложения Claude.",
+            paths=claude_code_home,
+            process_names=("claude.exe",),
+            # Отдельно установленный Claude Code и копия внутри приложения Claude.
+            exe_hint="\\.local\\bin\\|\\claude-code\\",
+        ),
+        Target(
+            "chatgpt", "ChatGPT", kind=AI,
+            hint="Вход в ChatGPT, история и настройки",
+            paths=tuple(
+                d / part
+                for d in _store_data(local, "OpenAI.ChatGPT-Desktop",
+                                     "OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0")
+                for part in ("LocalCache", "LocalState")
             ),
-            process_names=("ChatGPT.exe", "codex.exe"),
+            process_names=("ChatGPT.exe",),
             exe_paths=tuple(
                 d / name
                 for d in _store_install_dirs("OpenAI.ChatGPT")
                 for name in ("ChatGPT.exe", "app/ChatGPT.exe")
+            ),
+        ),
+        Target(
+            "codex", "Codex", kind=AI,
+            hint="Вход в Codex, история и настройки",
+            paths=(
+                # И приложение Codex, и консольная версия хранят вход здесь.
+                *codex_home,
+                *(d / part for d in _store_data(local, "OpenAI.Codex")
+                  for part in ("LocalCache", "LocalState")),
+            ),
+            process_names=("codex.exe",),
+            exe_paths=tuple(
+                d / name
+                for d in _store_install_dirs("OpenAI.Codex")
+                for name in ("Codex.exe", "app/Codex.exe")
             ),
         ),
         Target(
@@ -305,15 +337,17 @@ def _ai(local: Path, roaming: Path, home: Path | None) -> list[Target]:
     ]
 
 
-def _store_data(local: Path, prefix: str, known: str) -> tuple[Path, ...]:
+def _store_data(local: Path, prefix: str, known: str = "") -> tuple[Path, ...]:
     """Папки данных приложения из Microsoft Store: %LOCALAPPDATA%\\Packages\\<имя>_<код>.
 
-    Если приложения ещё нет, берём известное имя пакета — так оно под защитой,
-    даже если его установят посреди сессии.
+    Если приложения ещё нет и имя его пакета известно, берём его — так оно под
+    защитой, даже если его установят посреди сессии.
     """
     packages = local / "Packages"
     found = sorted(packages.glob(f"{prefix}_*")) if packages.is_dir() else []
-    return tuple(found) or (packages / known,)
+    if found:
+        return tuple(found)
+    return (packages / known,) if known else ()
 
 
 def _store_install_dirs(prefix: str) -> tuple[Path, ...]:

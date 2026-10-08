@@ -331,7 +331,24 @@ def test_vpn_and_ai_targets(tmp_path, monkeypatch):
         assert targets[vpn_id].kind == targets_mod.VPN
         assert targets_mod.SYSTEM_PROXY == targets[vpn_id].registry_values
     assert package / "LocalCache" / "Roaming" / "Claude" in targets["claude"].paths
-    assert tmp_path / "USERPROFILE" / ".claude" in targets["claude"].paths
+    # Каждая программа — отдельная карточка: Claude ≠ Claude Code, ChatGPT ≠ Codex.
+    assert tmp_path / "USERPROFILE" / ".claude" in targets["claude_code"].paths
+    assert tmp_path / "USERPROFILE" / ".claude" not in targets["claude"].paths
     # ChatGPT ещё не установлен — под защитой его известная папка пакета.
     assert any("OpenAI.ChatGPT-Desktop_" in str(p) for p in targets["chatgpt"].paths)
-    assert tmp_path / "USERPROFILE" / ".codex" in targets["chatgpt"].paths
+    assert tmp_path / "USERPROFILE" / ".codex" in targets["codex"].paths
+    assert tmp_path / "USERPROFILE" / ".codex" not in targets["chatgpt"].paths
+
+
+def test_claude_app_and_claude_code_close_their_own_processes():
+    """У обеих программ процесс claude.exe — различаем по пути к exe."""
+    targets = {t.id: t for t in known_targets()}
+    app = r"C:\Program Files\WindowsApps\Claude_2.1_x64__pzs8sxrjxfjjc\app\claude.exe"
+    code_in_app = (r"C:\Users\u\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache"
+                   r"\Roaming\Claude\claude-code\2.1\claude.exe")
+    code_alone = r"C:\Users\u\.local\bin\claude.exe"
+    assert targets["claude"].matches_exe(app)
+    assert not targets["claude_code"].matches_exe(app)
+    assert targets["claude_code"].matches_exe(code_in_app)
+    assert targets["claude_code"].matches_exe(code_alone)
+    assert not targets["claude"].matches_exe(code_alone)
