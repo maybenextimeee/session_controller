@@ -11,7 +11,7 @@ Set-Location (Split-Path $PSScriptRoot -Parent)
 
 $python = ".\.venv\Scripts\python.exe"
 if (-not (Test-Path $python)) {
-    throw "Не найдена виртуальная среда .venv — см. README"
+    throw "Не найдена виртуальная среда .venv — см. docs\DEVELOPMENT.md"
 }
 
 & $python -m PyInstaller --noconfirm --clean packaging\SessionController.spec
