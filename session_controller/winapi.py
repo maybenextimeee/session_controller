@@ -24,7 +24,27 @@ if sys.platform == "win32":
     _kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
     _kernel32.CreateMutexW.restype = wintypes.HANDLE
 
+    _wininet = ctypes.WinDLL("wininet", use_last_error=True)
+    _wininet.InternetSetOptionW.argtypes = [
+        ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
+    ]
+    _wininet.InternetSetOptionW.restype = wintypes.BOOL
+
 WM_NCACTIVATE = 0x0086
+INTERNET_OPTION_REFRESH = 37
+INTERNET_OPTION_SETTINGS_CHANGED = 39
+
+
+def notify_proxy_changed() -> None:
+    """Сообщить Windows, что настройки прокси в реестре изменились.
+
+    Иначе браузеры и программы ещё какое-то время ходили бы через старый прокси.
+    """
+    if sys.platform != "win32":
+        return
+    for option in (INTERNET_OPTION_SETTINGS_CHANGED, INTERNET_OPTION_REFRESH):
+        if not _wininet.InternetSetOptionW(None, option, None, 0):
+            log.warning("InternetSetOptionW(%s): ошибка %s", option, ctypes.get_last_error())
 
 
 def redraw_title_bar(hwnd: int) -> None:

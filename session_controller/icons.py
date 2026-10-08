@@ -34,10 +34,17 @@ _MONOGRAMS = {
     "vscode": ("#007acc", "VS"),
     "steam": ("#2a475e", "S"),
     "git": ("#f05032", "G"),
+    "happ": ("#2f80ed", "H"),
+    "v2raytun": ("#1f8ef1", "V"),
+    "hiddify": ("#4b6bfb", "H"),
+    "clash_verge": ("#5b5bd6", "C"),
+    "claude": ("#d97757", "C"),
+    "chatgpt": ("#10a37f", "AI"),
+    "cursor": ("#1f1f1f", "Cu"),
 }
 
 # Значок «ключ» из шрифта значков Windows (Segoe MDL2 Assets / Segoe Fluent Icons).
-_KEY_GLYPH = ""
+_KEY_GLYPH = "\ue8d7"
 _WINDOWS_BLUE = "#0078d4"
 
 _cache: dict[str, QIcon] = {}

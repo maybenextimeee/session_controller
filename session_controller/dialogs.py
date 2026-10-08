@@ -28,12 +28,12 @@ from session_controller.widgets import Background
 APP_NAME = "Session Controller"
 
 # Значки из шрифта Windows (Segoe MDL2 Assets / Segoe Fluent Icons) и запасные символы.
-SIGN_OUT = ("", "↪")
-WARNING = ("", "!")
-ERROR = ("", "!")
-INFO = ("", "i")
-RESTORED = ("", "↺")
-POWER = ("", "⏻")
+SIGN_OUT = ("\uf3b1", "↪")
+WARNING = ("\ue7ba", "!")
+ERROR = ("\ue783", "!")
+INFO = ("\ue946", "i")
+RESTORED = ("\ue81c", "↺")
+POWER = ("\ue7e8", "⏻")
 
 # Цвет значка.
 ACCENT = "accent"

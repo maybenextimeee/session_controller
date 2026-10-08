@@ -26,8 +26,8 @@ from pathlib import Path
 
 import psutil
 
-from session_controller import credentials, processes, registry, snapshot
-from session_controller.targets import CREDENTIALS, Target
+from session_controller import credentials, processes, registry, snapshot, winapi
+from session_controller.targets import CREDENTIALS, INTERNET_SETTINGS, Target
 
 log = logging.getLogger(__name__)
 
@@ -198,6 +198,8 @@ class Session:
 
         for item in entry["registry"]:
             registry.write(item["key"], item["name"], item["value"])
+        if any(item["key"] == INTERNET_SETTINGS for item in entry["registry"]):
+            winapi.notify_proxy_changed()
 
     def _backup_path(self, target_id: str, index: int) -> Path:
         return self.backup_root / target_id / str(index)

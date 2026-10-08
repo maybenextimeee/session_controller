@@ -35,6 +35,18 @@ def read_string(key: str, name: str) -> str | None:
     return None
 
 
+def subkeys(key: str) -> list[str]:
+    """Имена подразделов (пустой список, если раздела нет)."""
+    if sys.platform != "win32":
+        return []
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as handle:
+            count = winreg.QueryInfoKey(handle)[0]
+            return [winreg.EnumKey(handle, index) for index in range(count)]
+    except OSError:
+        return []
+
+
 def write(key: str, name: str, value: dict | None) -> None:
     """Записать значение, а если value is None — удалить его."""
     if sys.platform != "win32":

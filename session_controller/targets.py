@@ -1,4 +1,5 @@
-"""Что Session Controller умеет очищать: браузеры, приложения, хранилище паролей Windows.
+"""Что Session Controller умеет очищать: браузеры, приложения, VPN- и ИИ-клиенты,
+хранилище паролей Windows.
 
 Для браузеров и приложений работает одна схема: перед сессией запоминаем
 папки и файлы, где программа хранит входы в аккаунты, а в конце возвращаем
@@ -14,7 +15,22 @@ from session_controller import registry
 
 BROWSER = "browser"
 APP = "app"
+VPN = "vpn"
+AI = "ai"
 CREDENTIALS = "credentials"
+
+# Настройки прокси Windows. VPN-клиент в режиме «системный прокси» включает их,
+# и если закрыть его силой, прокси останется включённым на несуществующий адрес —
+# пропадёт интернет. Поэтому вместе с VPN-клиентами откатываем и их.
+INTERNET_SETTINGS = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+SYSTEM_PROXY = tuple(
+    (INTERNET_SETTINGS, name)
+    for name in ("ProxyEnable", "ProxyServer", "ProxyOverride", "AutoConfigURL")
+)
+
+# Где Windows записывает, куда установлены приложения из Microsoft Store.
+STORE_PACKAGES = (r"Software\Classes\Local Settings\Software\Microsoft\Windows"
+                  r"\CurrentVersion\AppModel\Repository\Packages")
 
 
 @dataclass(frozen=True)
@@ -65,6 +81,9 @@ def known_targets() -> list[Target]:
         targets += _apps(local, roaming, home)
     if home and roaming:
         targets.append(_git(home, roaming, local))
+    if local and roaming:
+        targets += _vpn(local, roaming, home)
+        targets += _ai(local, roaming, home)
     if sys.platform == "win32":
         targets.append(WINDOWS_CREDENTIALS)
     return targets
@@ -183,14 +202,144 @@ def _git(home: Path, roaming: Path, local: Path | None) -> Target:
     )
 
 
+def _vpn(local: Path, roaming: Path, home: Path | None) -> list[Target]:
+    hint = ("Подписки, ключи и серверы VPN-клиента.\n"
+            "Настройки прокси Windows тоже вернутся как были до сессии.")
+    programs = _program_files()
+    temp = Path(os.environ.get("SystemDrive", "C:") + "\\") / "Temp"
+    clash_id = "io.github.clash-verge-rev.clash-verge-rev"
+    return [
+        Target(
+            "happ", "Happ", kind=VPN, hint=hint,
+            # Happ ставится прямо в эту папку вместе со своими данными.
+            paths=(roaming / "Happ",),
+            process_names=("Happ.exe", "xray.exe", "sing-box.exe", "antifilter.exe"),
+            # xray.exe и sing-box.exe бывают и у других клиентов — закрываем только свои.
+            exe_hint="\\happ\\",
+            registry_values=SYSTEM_PROXY,
+            exe_paths=(roaming / "Happ" / "Happ.exe",),
+        ),
+        Target(
+            "v2raytun", "v2RayTun", kind=VPN, hint=hint,
+            paths=(
+                roaming / "v2RayTun.net",
+                # Текущее подключение (адрес сервера и ключ) v2RayTun кладёт сюда.
+                temp / "v2RayTun" / "connection.json",
+                temp / "v2RayTun" / "tunnel.json",
+            ),
+            process_names=("v2RayTun.exe", "xraycore.exe"),
+            exe_hint="v2raytun",
+            registry_values=SYSTEM_PROXY,
+            exe_paths=(home / "v2RayTun" / "v2RayTun.exe",) if home else (),
+        ),
+        Target(
+            "hiddify", "Hiddify", kind=VPN, hint=hint,
+            paths=(roaming / "Hiddify",),
+            process_names=("Hiddify.exe", "HiddifyCli.exe"),
+            exe_hint="hiddify",
+            registry_values=SYSTEM_PROXY,
+            exe_paths=tuple(d / "Hiddify" / "Hiddify.exe" for d in (local / "Programs", *programs)),
+        ),
+        Target(
+            "clash_verge", "Clash Verge", kind=VPN, hint=hint,
+            paths=(roaming / clash_id, local / clash_id),
+            process_names=("clash-verge.exe", "verge-mihomo.exe", "verge-mihomo-alpha.exe"),
+            registry_values=SYSTEM_PROXY,
+            exe_paths=tuple(d / "Clash Verge" / "clash-verge.exe" for d in programs),
+        ),
+    ]
+
+
+def _ai(local: Path, roaming: Path, home: Path | None) -> list[Target]:
+    vscode_cache = ("CachedData", "CachedExtensionVSIXs", "CachedProfilesData", "logs")
+    claude_cli = (home / ".claude", home / ".claude.json") if home else ()
+    codex_home = (home / ".codex",) if home else ()
+    return [
+        Target(
+            "claude", "Claude", kind=AI,
+            hint="Вход в Claude (приложение и Claude Code), чаты, настройки.\n"
+                 "Встроенный Claude Code приложение скачает заново.",
+            paths=(
+                # Версия из Microsoft Store хранит данные внутри своего пакета.
+                *(d / "LocalCache" / "Roaming" / "Claude"
+                  for d in _store_data(local, "Claude", "Claude_pzs8sxrjxfjjc")),
+                roaming / "Claude",
+                *claude_cli,
+            ),
+            # Закрываем и приложение, и Claude Code: оба пишут в ~\.claude.
+            process_names=("claude.exe",),
+            # Встроенная копия Claude Code весит сотни мегабайт, входов в ней нет.
+            skip=("claude-code", "vm_bundles", "logs"),
+            exe_paths=(
+                *(d / "app" / "claude.exe" for d in _store_install_dirs("Claude_")),
+                local / "AnthropicClaude" / "claude.exe",
+            ),
+        ),
+        Target(
+            "chatgpt", "ChatGPT и Codex", kind=AI,
+            hint="Вход в ChatGPT и Codex, история и настройки",
+            paths=(
+                *(d / part
+                  for d in _store_data(local, "OpenAI.ChatGPT-Desktop",
+                                       "OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0")
+                  for part in ("LocalCache", "LocalState")),
+                # Codex (и приложение, и консольная версия) хранит вход здесь.
+                *codex_home,
+            ),
+            process_names=("ChatGPT.exe", "codex.exe"),
+            exe_paths=tuple(
+                d / name
+                for d in _store_install_dirs("OpenAI.ChatGPT")
+                for name in ("ChatGPT.exe", "app/ChatGPT.exe")
+            ),
+        ),
+        Target(
+            "cursor", "Cursor", kind=AI,
+            hint="Вход в Cursor, настройки, история.\n"
+                 "Несохранённые файлы в Cursor пропадут.",
+            paths=(roaming / "Cursor",),
+            process_names=("Cursor.exe",),
+            skip=vscode_cache,
+            exe_paths=(local / "Programs" / "cursor" / "Cursor.exe",),
+        ),
+    ]
+
+
+def _store_data(local: Path, prefix: str, known: str) -> tuple[Path, ...]:
+    """Папки данных приложения из Microsoft Store: %LOCALAPPDATA%\\Packages\\<имя>_<код>.
+
+    Если приложения ещё нет, берём известное имя пакета — так оно под защитой,
+    даже если его установят посреди сессии.
+    """
+    packages = local / "Packages"
+    found = sorted(packages.glob(f"{prefix}_*")) if packages.is_dir() else []
+    return tuple(found) or (packages / known,)
+
+
+def _store_install_dirs(prefix: str) -> tuple[Path, ...]:
+    """Куда установлены приложения из Microsoft Store (для значков).
+
+    Сама папка WindowsApps закрыта для просмотра, поэтому путь берём из реестра.
+    """
+    dirs = []
+    for package in registry.subkeys(STORE_PACKAGES):
+        if package.lower().startswith(prefix.lower()):
+            root = registry.read_string(rf"{STORE_PACKAGES}\{package}", "PackageRootFolder")
+            if root:
+                dirs.append(Path(root))
+    return tuple(dirs)
+
+
 def _steam_dir() -> Path | None:
+    """Папка Steam: из реестра, а если Steam ещё нет — куда его ставят по умолчанию.
+
+    Так Steam под защитой, даже если его установят посреди сессии.
+    """
     path = registry.read_string(r"Software\Valve\Steam", "SteamPath")
     if path:
         return Path(path)
-    program_files = os.environ.get("ProgramFiles(x86)")
-    if program_files and (Path(program_files) / "Steam").is_dir():
-        return Path(program_files) / "Steam"
-    return None
+    programs = _program_files()
+    return programs[-1] / "Steam" if programs else None
 
 
 def _program_files() -> tuple[Path, ...]:

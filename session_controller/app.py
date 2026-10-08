@@ -9,7 +9,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from PySide6.QtCore import QLockFile, Qt, QTimer, QUrl
-from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QIcon
+from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QIcon, QKeySequence, QShortcut
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
     QApplication,
@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QPushButton,
+    QSizePolicy,
     QStackedWidget,
     QSystemTrayIcon,
     QToolButton,
@@ -32,12 +33,24 @@ from session_controller.icons import make_icon, target_icon
 from session_controller.paths import app_home
 from session_controller.session import Session, SessionError
 from session_controller.settings import Settings
-from session_controller.targets import Target, known_targets
+from session_controller.targets import (
+    AI,
+    APP,
+    BROWSER,
+    CREDENTIALS,
+    VPN,
+    Target,
+    known_targets,
+)
 from session_controller.widgets import (
+    CenteredColumn,
     Background,
+    Overlay,
+    PressableIcon,
     Segmented,
+    SessionButton,
     SettingRow,
-    StatusPill,
+    SmoothScrollArea,
     TargetCard,
 )
 from session_controller.winapi import (
@@ -57,8 +70,21 @@ APP_MUTEX = "SessionControllerMutex"
 INSTANCE_SERVER = f"SessionController-{getpass.getuser()}"
 
 # Значки из шрифта Windows (Segoe MDL2 Assets / Segoe Fluent Icons) и запасные символы.
-GEAR_GLYPH, GEAR_FALLBACK = "", "⚙"
-BACK_GLYPH, BACK_FALLBACK = "", "←"
+GEAR_GLYPH, GEAR_FALLBACK = "\ue713", "⚙"
+BACK_GLYPH, BACK_FALLBACK = "\ue72b", "←"
+CLOSE_GLYPH, CLOSE_FALLBACK = "\ue711", "✕"
+
+# Всё содержимое окна — в колонке не шире этой: на большом окне она стоит по
+# центру, а не растягивается на весь экран.
+CONTENT_WIDTH = 576
+WINDOW_MARGINS = (22, 18, 22, 22)  # слева, сверху, справа, снизу
+
+# Если на компьютере найдено меньше программ, сетка добирается ненайденными
+# (бледными), чтобы было видно, что ещё умеет Session Controller.
+MIN_GRID_CARDS = 6
+# В каком порядке добирать: сначала самые нужные в аудитории.
+FILLER_ORDER = ("telegram", "steam", "discord", "vscode", "git", "claude", "chatgpt",
+                "happ", "v2raytun", "hiddify", "chrome", "firefox", "yandex", "edge")
 
 
 class MainWindow(QMainWindow):
@@ -75,24 +101,27 @@ class MainWindow(QMainWindow):
         self.settings_path = settings_path
         self.themes = themes
         self._user_quit = False
-        self._tray_hint_shown = False
         self._busy = False
 
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(make_icon())
-        self.setMinimumWidth(540)
+        self.setMinimumSize(480, 460)
 
         self.pages = QStackedWidget()
         self.main_page = self._build_main_page()
         self.settings_page = self._build_settings_page()
         self.pages.addWidget(self.main_page)
         self.pages.addWidget(self.settings_page)
+        self._switch_page(self.main_page)
 
         background = Background()
+        # Колонка не шире CONTENT_WIDTH и не выше, чем нужно содержимому;
+        # лишнее место вокруг делится поровну — колонка стоит по центру.
         root = QVBoxLayout(background)
-        root.setContentsMargins(22, 18, 22, 22)
-        root.addWidget(self.pages)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.addWidget(CenteredColumn(self.pages, CONTENT_WIDTH, WINDOW_MARGINS))
         self.setCentralWidget(background)
+        self.apps_overlay = self._build_apps_overlay(background)
 
         self.tray = QSystemTrayIcon(make_icon(), self)
         self.tray_menu = QMenu()
@@ -136,8 +165,12 @@ class MainWindow(QMainWindow):
         self.clock.timeout.connect(self.refresh)
         self.clock.start()
 
+        escape = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        escape.activated.connect(self.on_escape)
+
         themes.changed.connect(self.on_theme_changed)
         self.refresh()
+        self._fit_to_screen()
 
     # ---------- Страницы ----------
 
@@ -145,9 +178,7 @@ class MainWindow(QMainWindow):
         settings_button = _icon_button(GEAR_GLYPH, GEAR_FALLBACK, "Настройки")
         settings_button.clicked.connect(self.show_settings)
 
-        logo = QLabel()
-        logo.setFixedSize(40, 40)
-        logo.setPixmap(make_icon().pixmap(40, 40))
+        logo = PressableIcon(make_icon(), 40)
         title = QLabel(APP_NAME)
         title.setObjectName("appTitle")
         subtitle = QLabel("Выход из всех аккаунтов одной кнопкой")
@@ -163,39 +194,6 @@ class MainWindow(QMainWindow):
         header.addLayout(title_box, 1)
         header.addWidget(settings_button)
 
-        # Карточка сессии: статус, крупный заголовок (во время сессии — таймер),
-        # пояснение и главная кнопка.
-        self.status_pill = StatusPill()
-        self.started_label = QLabel()
-        self.started_label.setObjectName("small")
-        status_row = QHBoxLayout()
-        status_row.addWidget(self.status_pill)
-        status_row.addStretch(1)
-        status_row.addWidget(self.started_label)
-
-        self.headline = QLabel()
-        self.headline.setObjectName("headline")
-        self.hero_text = QLabel()
-        self.hero_text.setObjectName("muted")
-        self.hero_text.setWordWrap(True)
-        self.toggle_button = QPushButton()
-        self.toggle_button.setObjectName("primary")
-        self.toggle_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.toggle_button.clicked.connect(self.toggle_session)
-
-        hero = QFrame()
-        hero.setObjectName("panel")
-        hero_layout = QVBoxLayout(hero)
-        hero_layout.setContentsMargins(20, 18, 20, 20)
-        hero_layout.setSpacing(0)
-        hero_layout.addLayout(status_row)
-        hero_layout.addSpacing(14)
-        hero_layout.addWidget(self.headline)
-        hero_layout.addSpacing(4)
-        hero_layout.addWidget(self.hero_text)
-        hero_layout.addSpacing(18)
-        hero_layout.addWidget(self.toggle_button)
-
         # Что очищать.
         self.targets_counter = QLabel()
         self.targets_counter.setObjectName("counter")
@@ -204,40 +202,158 @@ class MainWindow(QMainWindow):
         targets_header.addStretch(1)
         targets_header.addWidget(self.targets_counter)
 
-        targets_grid = QGridLayout()
-        targets_grid.setHorizontalSpacing(8)
-        targets_grid.setVerticalSpacing(8)
+        # Найденные на компьютере программы можно включать и выключать.
+        # Новая программа появится здесь после перезапуска Session Controller.
         self.target_cards: dict[str, TargetCard] = {}
-        icon_font = theme.fonts().icons
+        cards: list[TargetCard] = []
         installed = self.session.installed_targets()
-        for index, target in enumerate(installed):
-            card = TargetCard(target_icon(target, icon_font), target.name, target.hint)
+        for target in installed:
+            card = self._target_card(target, installed=True)
             card.switch.setChecked(target.id not in self.settings.disabled_targets)
             card.switch.toggled.connect(self.on_targets_changed)
-            # Последняя карточка без пары растягивается на всю ширину.
-            span = 2 if index == len(installed) - 1 and index % 2 == 0 else 1
-            targets_grid.addWidget(card, index // 2, index % 2, 1, span)
             self.target_cards[target.id] = card
+            cards.append(card)
+
+        missing = sorted(
+            (t for t in self.session.targets if t.id not in self.target_cards),
+            key=lambda t: FILLER_ORDER.index(t.id) if t.id in FILLER_ORDER else len(FILLER_ORDER),
+        )
+        for target in missing[:max(0, MIN_GRID_CARDS - len(cards))]:
+            cards.append(self._target_card(target, installed=False))
+
+        targets_grid = QGridLayout()
+        targets_grid.setHorizontalSpacing(12)
+        targets_grid.setVerticalSpacing(12)
+        for index, card in enumerate(cards):
+            # Последняя карточка без пары растягивается на всю ширину.
+            span = 2 if index == len(cards) - 1 and index % 2 == 0 else 1
+            targets_grid.addWidget(card, index // 2, index % 2, 1, span)
         targets_grid.setColumnStretch(0, 1)
         targets_grid.setColumnStretch(1, 1)
-        if not self.target_cards:
-            empty = QLabel("Не найдено ни одной поддерживаемой программы")
-            empty.setObjectName("muted")
-            targets_grid.addWidget(empty, 0, 0)
 
-        page = QWidget()
-        layout = QVBoxLayout(page)
+        all_button = QPushButton(f"Все поддерживаемые программы · {len(self.session.targets)}  ›")
+        all_button.setObjectName("moreButton")
+        all_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        all_button.clicked.connect(self.show_all_programs)
+
+        # Если программ много или экран маленький, главная страница прокручивается.
+        self.main_content = QWidget()
+        layout = QVBoxLayout(self.main_content)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addLayout(header)
-        layout.addSpacing(20)
-        layout.addWidget(hero)
-        layout.addSpacing(22)
+        layout.addSpacing(26)
         layout.addLayout(targets_header)
         layout.addSpacing(10)
         layout.addLayout(targets_grid)
+        layout.addSpacing(6)
+        layout.addWidget(all_button, 0, Qt.AlignmentFlag.AlignHCenter)
         layout.addStretch(1)
+
+        self.main_scroll = SmoothScrollArea()
+        self.main_scroll.setWidget(self.main_content)
+
+        # Одна кнопка внизу окна — всё о сессии написано прямо на ней.
+        self.session_button = SessionButton()
+        self.session_button.clicked.connect(self.toggle_session)
+
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(0)
+        page_layout.addWidget(self.main_scroll, 1)
+        page_layout.addSpacing(32)
+        page_layout.addWidget(self.session_button)
         return page
+
+    def _fit_to_screen(self) -> None:
+        """Начальный размер окна: всё видно без прокрутки, но не больше экрана."""
+        # Размеры считаем уже с применённым стилем: шрифты темы крупнее стандартных.
+        self.ensurePolished()
+        left, top, right, bottom = WINDOW_MARGINS
+        # Берём высоту самой высокой страницы — чтобы и настройки помещались целиком.
+        # Главная пониже просто встанет по центру.
+        pages = max(self.main_page.sizeHint().height(), self.settings_page.sizeHint().height())
+        height = pages + top + bottom
+        screen = self.screen()
+        if screen:
+            height = min(height, screen.availableGeometry().height() - 80)
+        self.resize(CONTENT_WIDTH + left + right, max(height, self.minimumHeight()))
+
+    def _target_card(self, target: Target, installed: bool) -> TargetCard:
+        return TargetCard(target_icon(target, theme.fonts().icons), target.name, target.hint,
+                          installed=installed)
+
+    def _build_apps_overlay(self, parent: QWidget) -> Overlay:
+        """Панель поверх окна со всеми программами, которые умеет очищать Session Controller."""
+        overlay = Overlay(parent)
+
+        title = QLabel("Все программы")
+        title.setObjectName("pageTitle")
+        subtitle = QLabel(
+            f"Всего: {len(self.session.targets)}, на этом компьютере найдено: "
+            f"{len(self.target_cards)}."
+        )
+        subtitle.setObjectName("small")
+        texts = QVBoxLayout()
+        texts.setSpacing(2)
+        texts.addWidget(title)
+        texts.addWidget(subtitle)
+        close_button = _icon_button(CLOSE_GLYPH, CLOSE_FALLBACK, "Закрыть")
+        close_button.clicked.connect(overlay.close_overlay)
+        header = QHBoxLayout()
+        header.addLayout(texts, 1)
+        header.addWidget(close_button, 0, Qt.AlignmentFlag.AlignTop)
+
+        note = QLabel(
+            "Программы, которых нет на компьютере, тоже под защитой: если их установят "
+            "и запустят во время сессии, при завершении их данные удалятся. "
+            "Новая программа станет доступна после перезапуска Session Controller."
+        )
+        note.setObjectName("small")
+        note.setWordWrap(True)
+
+        # Найденные программы здесь переключаются так же, как в главном окне.
+        self.overlay_cards: dict[str, TargetCard] = {}
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 6, 0)
+        content_layout.setSpacing(6)
+        for group_title, kind in (("Браузеры", BROWSER), ("Приложения", APP), ("VPN", VPN),
+                                  ("ИИ", AI), ("Windows", CREDENTIALS)):
+            group = [t for t in self.session.targets if t.kind == kind]
+            if not group:
+                continue
+            # Сначала найденные, потом остальные.
+            group.sort(key=lambda t: t.id not in self.target_cards)
+            content_layout.addSpacing(10)
+            content_layout.addWidget(_section_label(group_title))
+            content_layout.addSpacing(2)
+            for target in group:
+                card = self._target_card(target, installed=target.id in self.target_cards)
+                if target.id in self.target_cards:
+                    main_card = self.target_cards[target.id]
+                    card.switch.setChecked(main_card.switch.isChecked())
+                    card.switch.toggled.connect(main_card.switch.setChecked)
+                    self.overlay_cards[target.id] = card
+                content_layout.addWidget(card)
+        content_layout.addStretch(1)
+
+        scroll = SmoothScrollArea()
+        scroll.setWidget(content)
+
+        layout = QVBoxLayout(overlay.panel)
+        layout.setContentsMargins(20, 18, 14, 16)
+        layout.setSpacing(0)
+        layout.addLayout(header)
+        layout.addSpacing(10)
+        layout.addWidget(note)
+        layout.addSpacing(4)
+        layout.addWidget(scroll, 1)
+        return overlay
+
+    def show_all_programs(self) -> None:
+        self.apps_overlay.open()
 
     def _build_settings_page(self) -> QWidget:
         back_button = _icon_button(BACK_GLYPH, BACK_FALLBACK, "Назад")
@@ -315,8 +431,8 @@ class MainWindow(QMainWindow):
             about_layout.addSpacing(12)
             about_layout.addWidget(link)
 
-        page = QWidget()
-        layout = QVBoxLayout(page)
+        content = QWidget()
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addLayout(header)
@@ -335,13 +451,35 @@ class MainWindow(QMainWindow):
         layout.addSpacing(10)
         layout.addWidget(about)
         layout.addStretch(1)
+
+        # В маленьком окне настройки прокручиваются, а не обрезаются.
+        page = SmoothScrollArea()
+        page.setWidget(content)
         return page
 
     def show_settings(self) -> None:
-        self.pages.setCurrentWidget(self.settings_page)
+        self._switch_page(self.settings_page)
+        self.settings_page.setFocus()
 
     def show_main(self) -> None:
-        self.pages.setCurrentWidget(self.main_page)
+        self._switch_page(self.main_page)
+
+    def _switch_page(self, page: QWidget) -> None:
+        # Высоту колонки задаёт только видимая страница: иначе короткая главная
+        # растягивалась бы до высоты настроек, и под списком была бы пустота.
+        for other in (self.main_page, self.settings_page):
+            policy = (QSizePolicy.Policy.Preferred if other is page
+                      else QSizePolicy.Policy.Ignored)
+            other.setSizePolicy(policy, policy)
+        self.pages.setCurrentWidget(page)
+        self.pages.updateGeometry()
+
+    def on_escape(self) -> None:
+        """Esc закрывает то, что открыто поверх главной: панель или настройки."""
+        if self.apps_overlay.isVisible():
+            self.apps_overlay.close_overlay()
+        elif self.pages.currentWidget() is self.settings_page:
+            self.show_main()
 
     # ---------- Сессия ----------
 
@@ -414,7 +552,7 @@ class MainWindow(QMainWindow):
         """Выполнить долгую операцию, показывая, что программа занята."""
         self._busy = True
         self.show_progress(text)
-        self.toggle_button.setEnabled(False)
+        self.session_button.setEnabled(False)
         self._set_targets_enabled(False)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
@@ -430,9 +568,7 @@ class MainWindow(QMainWindow):
             self.refresh()
 
     def show_progress(self, text: str) -> None:
-        self.status_pill.set_status(theme.current().busy, "Подожди")
-        self.started_label.setText("")
-        self.headline.setText(text)
+        self.session_button.set_state(SessionButton.BUSY, text)
         QApplication.processEvents()
 
     def recover_after_restart(self) -> None:
@@ -537,52 +673,31 @@ class MainWindow(QMainWindow):
         """Обновить надписи под текущее состояние сессии."""
         if self._busy:
             return
-        t = theme.current()
         active = self.session.is_active
         if active:
             started = _format_time(self.session.started_at)
-            self.status_pill.set_status(t.accent, "Идёт сессия", pulsing=True)
-            self.started_label.setText(f"начата в {started}")
-            self.headline.setText(_format_duration(datetime.now() - self.session.started_at))
-            text = "Все входы в аккаунты исчезнут с компьютера, когда ты завершишь сессию"
-            if self.settings.logout_on_shutdown:
-                text += " или выключишь компьютер"
-            self.hero_text.setText(text + ".")
-            self.toggle_button.setText("Завершить сессию")
+            duration = _format_duration(datetime.now() - self.session.started_at)
+            self.session_button.set_state(SessionButton.STOP, "Завершить сессию",
+                                          f"идёт {duration} · с {started}")
             self.tray_toggle_action.setText("Завершить сессию")
             tray_status = f"Сессия идёт с {started}"
         else:
-            self.status_pill.set_status(t.dim, "Не активна")
-            self.started_label.setText("")
-            if self.has_selection():
-                self.headline.setText("Готов к работе")
-                self.hero_text.setText(
-                    "Начни сессию и работай как обычно. В конце одна кнопка вернёт компьютер "
-                    "к тому, каким он был до тебя, — без твоих аккаунтов."
-                )
-            else:
-                self.headline.setText("Нечего очищать")
-                self.hero_text.setText(
-                    "Включи хотя бы одну программу в списке ниже — тогда можно будет "
-                    "начать сессию."
-                )
-            self.toggle_button.setText("Начать сессию")
+            hint = "" if self.has_selection() else "включи хотя бы одну программу"
+            self.session_button.set_state(SessionButton.START, "Начать сессию", hint)
             self.tray_toggle_action.setText("Начать сессию")
             tray_status = "Сессия не активна"
 
-        # Главная кнопка: градиент — начать, контрастная — завершить.
         # Начать нельзя, пока не выбрана ни одна программа.
         can_toggle = active or self.has_selection()
-        self.toggle_button.setEnabled(can_toggle)
-        self.toggle_button.setCursor(Qt.CursorShape.PointingHandCursor if can_toggle
-                                     else Qt.CursorShape.ForbiddenCursor)
+        self.session_button.setEnabled(can_toggle)
+        self.session_button.setCursor(Qt.CursorShape.PointingHandCursor if can_toggle
+                                      else Qt.CursorShape.ForbiddenCursor)
         self.tray_toggle_action.setEnabled(can_toggle)
-        self.toggle_button.setProperty("inverse", active)
-        self.toggle_button.style().unpolish(self.toggle_button)
-        self.toggle_button.style().polish(self.toggle_button)
 
         # Во время сессии список не меняется: он был зафиксирован при старте.
         self._set_targets_enabled(not active)
+        for target_id, card in self.overlay_cards.items():
+            card.switch.setChecked(self.target_cards[target_id].switch.isChecked())
         enabled = sum(card.switch.isChecked() for card in self.target_cards.values())
         if active:
             self.targets_counter.setText("до конца сессии")
@@ -598,7 +713,7 @@ class MainWindow(QMainWindow):
         return [(target_icon(t, icon_font), t.name) for t in targets]
 
     def _set_targets_enabled(self, enabled: bool) -> None:
-        for card in self.target_cards.values():
+        for card in (*self.target_cards.values(), *self.overlay_cards.values()):
             card.setEnabled(enabled)
 
     def show_window(self) -> None:
@@ -620,12 +735,6 @@ class MainWindow(QMainWindow):
             # Программа продолжает работать в трее: так она поймает выключение
             # компьютера. Совсем выйти можно через меню значка в трее.
             self.hide()
-            if not self._tray_hint_shown:
-                text = "Программа работает здесь, в трее."
-                if self.session.is_active:
-                    text = "Сессия продолжается. " + text
-                self.tray.showMessage(APP_NAME, text, make_icon())
-                self._tray_hint_shown = True
         else:
             self.quit_app()
 

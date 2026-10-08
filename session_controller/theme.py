@@ -49,6 +49,7 @@ class Theme:
     glow_1: str         # свечение фона
     glow_2: str
     dots: str           # точечная сетка фона
+    scrim: str          # затемнение окна под панелью поверх него
 
 
 DARK_THEME = Theme(
@@ -73,6 +74,7 @@ DARK_THEME = Theme(
     glow_1="rgba(62, 230, 168, 0.11)",
     glow_2="rgba(196, 242, 92, 0.05)",
     dots="rgba(255, 255, 255, 0.07)",
+    scrim="rgba(4, 7, 6, 0.74)",
 )
 
 LIGHT_THEME = Theme(
@@ -97,6 +99,7 @@ LIGHT_THEME = Theme(
     glow_1="rgba(62, 230, 168, 0.28)",
     glow_2="rgba(196, 242, 92, 0.22)",
     dots="rgba(14, 30, 22, 0.09)",
+    scrim="rgba(14, 22, 18, 0.34)",
 )
 
 
@@ -245,11 +248,6 @@ QLabel#pageTitle {{
     font-size: 14pt;
     font-weight: 600;
 }}
-QLabel#headline {{
-    font-family: "{f.display}";
-    font-size: 21pt;
-    font-weight: 600;
-}}
 QLabel#caps {{
     font-family: "{f.display}";
     font-size: 8.5pt;
@@ -269,22 +267,11 @@ QLabel#counter {{
 QLabel#muted {{ color: {t.muted}; }}
 QLabel#small {{ color: {t.muted}; font-size: 9pt; }}
 QLabel#cardTitle {{ font-weight: 600; }}
-QLabel#statusText {{
-    font-family: "{f.display}";
-    font-size: 8.5pt;
-    font-weight: 600;
-    letter-spacing: 1px;
-}}
 
 QFrame#panel {{
     background: {t.surface};
     border: 1px solid {t.border};
     border-radius: 16px;
-}}
-QFrame#pill {{
-    background: {t.surface_2};
-    border: none;
-    border-radius: 12px;
 }}
 QFrame#card {{
     background: {t.surface};
@@ -321,31 +308,6 @@ QPushButton:hover {{ background: {t.surface_hover}; border-color: {t.dim}; }}
 QPushButton:pressed {{ background: {t.surface_2}; }}
 QPushButton:disabled {{ color: {t.dim}; border-color: {t.border}; }}
 
-QPushButton#primary {{
-    border: none;
-    border-radius: 12px;
-    padding: 14px 22px;
-    font-family: "{f.display}";
-    font-size: 12pt;
-    font-weight: 600;
-    color: {ON_ACCENT};
-    background: {gradient};
-}}
-QPushButton#primary:hover {{
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #5af0b8, stop:1 #d2f77a);
-}}
-QPushButton#primary:pressed {{
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #2fcf94, stop:1 #b0de48);
-}}
-QPushButton#primary[inverse="true"] {{
-    background: {t.inverse_bg};
-    color: {t.inverse_text};
-}}
-QPushButton#primary[inverse="true"]:hover {{ background: {t.inverse_hover}; }}
-QPushButton#primary:disabled {{
-    background: {t.surface_2};
-    color: {t.dim};
-}}
 
 QPushButton#segment {{
     background: transparent;
@@ -397,6 +359,50 @@ QPushButton#dialogSecondary:hover {{
     background: {t.surface_hover};
     border-color: {t.dim};
 }}
+
+QLabel#tag {{
+    font-family: "{f.display}";
+    font-size: 8pt;
+    font-weight: 600;
+    color: {t.dim};
+    background: {t.surface_2};
+    border-radius: 8px;
+    padding: 2px 7px;
+}}
+QPushButton#moreButton {{
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+    padding: 8px 12px;
+    min-width: 0;
+    color: {t.dim};
+}}
+QPushButton#moreButton:hover {{
+    color: {t.text};
+    background: {t.surface};
+}}
+QFrame#sheet {{
+    background: {t.bg};
+    border: 1px solid {t.border_strong};
+    border-radius: 18px;
+}}
+QScrollArea, QScrollArea > QWidget > QWidget {{
+    background: transparent;
+    border: none;
+}}
+QScrollBar:vertical {{
+    background: transparent;
+    width: 8px;
+    margin: 2px;
+}}
+QScrollBar::handle:vertical {{
+    background: {t.border_strong};
+    border-radius: 2px;
+    min-height: 32px;
+}}
+QScrollBar::handle:vertical:hover {{ background: {t.dim}; }}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
 
 QPushButton#linkButton {{
     background: transparent;

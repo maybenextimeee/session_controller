@@ -9,6 +9,7 @@ import pytest
 
 from session_controller import credentials, processes, registry, snapshot
 from session_controller import session as session_mod
+from session_controller import targets as targets_mod
 from session_controller.session import Session, SessionError
 from session_controller.settings import Settings
 from session_controller.targets import BROWSER, CREDENTIALS, Target, known_targets
@@ -278,3 +279,59 @@ def test_vscode_target_includes_shared_storage(tmp_path, monkeypatch):
     vscode = next(t for t in known_targets() if t.id == "vscode")
     assert tmp_path / "APPDATA" / "Code" in vscode.paths
     assert tmp_path / "USERPROFILE" / ".vscode-shared" in vscode.paths
+
+
+def test_steam_is_protected_even_if_not_installed(tmp_path, monkeypatch):
+    """Steam ещё нет — следим за папкой, куда его ставят по умолчанию."""
+    for name in ("LOCALAPPDATA", "APPDATA", "USERPROFILE", "ProgramFiles", "ProgramFiles(x86)"):
+        monkeypatch.setenv(name, str(tmp_path / name))
+    monkeypatch.setattr(registry, "read_string", lambda _key, _name: None)
+    steam = next(t for t in known_targets() if t.id == "steam")
+    assert tmp_path / "ProgramFiles(x86)" / "Steam" / "config" / "loginusers.vdf" in steam.paths
+    assert not steam.is_installed()
+
+
+def test_system_proxy_is_restored_and_announced(home, monkeypatch):
+    """VPN, закрытый силой, оставляет включённый прокси — в конце сессии его нужно вернуть."""
+    key = targets_mod.INTERNET_SETTINGS
+    values = {(key, "ProxyEnable"): {"type": 4, "data": 0}}
+    monkeypatch.setattr(registry, "read", lambda k, n: values.get((k, n)))
+
+    def fake_write(k, n, value):
+        if value is None:
+            values.pop((k, n), None)
+        else:
+            values[(k, n)] = value
+
+    monkeypatch.setattr(registry, "write", fake_write)
+    announced = []
+    monkeypatch.setattr(session_mod.winapi, "notify_proxy_changed", lambda: announced.append(1))
+
+    target = Target("vpn", "VPN", kind=targets_mod.VPN, process_names=NO_PROCESS,
+                    registry_values=targets_mod.SYSTEM_PROXY)
+    session = Session(home, [target])
+    session.start([target])
+    values[(key, "ProxyEnable")] = {"type": 4, "data": 1}
+    values[(key, "ProxyServer")] = {"type": 1, "data": "127.0.0.1:10808"}
+    session.end()
+
+    assert values == {(key, "ProxyEnable"): {"type": 4, "data": 0}}
+    assert announced == [1]
+
+
+def test_vpn_and_ai_targets(tmp_path, monkeypatch):
+    for name in ("LOCALAPPDATA", "APPDATA", "USERPROFILE", "ProgramFiles", "ProgramFiles(x86)"):
+        monkeypatch.setenv(name, str(tmp_path / name))
+    # Claude из Microsoft Store: папку пакета находим по началу имени.
+    package = tmp_path / "LOCALAPPDATA" / "Packages" / "Claude_test123"
+    package.mkdir(parents=True)
+    targets = {t.id: t for t in known_targets()}
+
+    for vpn_id in ("happ", "v2raytun", "hiddify", "clash_verge"):
+        assert targets[vpn_id].kind == targets_mod.VPN
+        assert targets_mod.SYSTEM_PROXY == targets[vpn_id].registry_values
+    assert package / "LocalCache" / "Roaming" / "Claude" in targets["claude"].paths
+    assert tmp_path / "USERPROFILE" / ".claude" in targets["claude"].paths
+    # ChatGPT ещё не установлен — под защитой его известная папка пакета.
+    assert any("OpenAI.ChatGPT-Desktop_" in str(p) for p in targets["chatgpt"].paths)
+    assert tmp_path / "USERPROFILE" / ".codex" in targets["chatgpt"].paths
