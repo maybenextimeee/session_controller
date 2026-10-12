@@ -8,7 +8,7 @@ from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from PySide6.QtCore import QLockFile, Qt, QTimer, QUrl
+from PySide6.QtCore import QLockFile, QObject, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QIcon, QKeySequence, QShortcut
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
@@ -88,6 +88,29 @@ FILLER_ORDER = ("telegram", "steam", "discord", "vscode", "git", "claude", "clau
                 "yandex", "edge")
 
 
+class _SessionWorker(QObject):
+    """Выполняет снимок или откат в отдельном потоке, чтобы окно не подвисало.
+
+    task получает функцию progress(done, total, name) и вызывает движок.
+    По окончании — сигнал finished(получилось ли, текст ошибки).
+    """
+
+    progress = Signal(int, int, str)
+    finished = Signal(bool, str)
+
+    def __init__(self, task: Callable[[Callable[[int, int, str], None]], None]) -> None:
+        super().__init__()
+        self._task = task
+
+    def run(self) -> None:
+        try:
+            self._task(self.progress.emit)
+            self.finished.emit(True, "")
+        except Exception as error:
+            log.exception("Ошибка при выполнении операции сессии")
+            self.finished.emit(False, str(error))
+
+
 class MainWindow(QMainWindow):
     def __init__(
         self,
@@ -103,6 +126,8 @@ class MainWindow(QMainWindow):
         self.themes = themes
         self._user_quit = False
         self._busy = False
+        self._task_thread: QThread | None = None
+        self._task_worker: _SessionWorker | None = None
 
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(make_icon())
@@ -493,6 +518,8 @@ class MainWindow(QMainWindow):
         return [t for t in self.session.targets if t.id not in self.settings.disabled_targets]
 
     def toggle_session(self) -> None:
+        if self._busy:
+            return
         if self.session.is_active:
             self.end_session()
         else:
@@ -528,9 +555,10 @@ class MainWindow(QMainWindow):
         ):
             return
 
-        self.run_task("Сохраняю состояние…", lambda: self.session.start(targets, self.show_progress))
+        self.run_task("Сохраняю", lambda progress: self.session.start(targets, progress))
 
-    def end_session(self, confirm: bool = True) -> bool:
+    def end_session(self, confirm: bool = True,
+                    on_done: Callable[[bool], None] | None = None) -> None:
         if confirm:
             text = "Всё, что появилось за сессию, — входы в аккаунты, пароли, история — исчезнет."
             running = self.session.running(self.session.session_targets())
@@ -545,32 +573,61 @@ class MainWindow(QMainWindow):
                 items=self._program_items(running),
                 items_title="Будут закрыты",
             ):
-                return False
+                if on_done is not None:
+                    on_done(False)
+                return
 
-        return self.run_task("Выхожу из аккаунтов…", lambda: self.session.end(self.show_progress))
+        self.run_task("Очищаю", lambda progress: self.session.end(progress), on_done)
 
-    def run_task(self, text: str, task: Callable[[], None]) -> bool:
-        """Выполнить долгую операцию, показывая, что программа занята."""
+    def run_task(self, verb: str,
+                 task: Callable[[Callable[[int, int, str], None]], None],
+                 on_done: Callable[[bool], None] | None = None) -> None:
+        """Выполнить долгую операцию в фоне, показывая прогресс на кнопке.
+
+        Окно остаётся отзывчивым: снимок/откут большого профиля идёт в отдельном
+        потоке. Когда всё закончится, вызывается on_done(получилось ли).
+        """
+        if self._busy:
+            return
         self._busy = True
-        self.show_progress(text)
+        self._task_verb = verb
+        self.session_button.set_state(SessionButton.BUSY, verb + "…")
         self.session_button.setEnabled(False)
+        self.tray_toggle_action.setEnabled(False)
         self._set_targets_enabled(False)
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            task()
-            return True
-        except Exception as error:
-            log.exception("Ошибка при выполнении: %s", text)
-            dialogs.inform(self, "Что-то пошло не так", str(error), dialogs.ERROR, dialogs.DANGER)
-            return False
-        finally:
-            QApplication.restoreOverrideCursor()
-            self._busy = False
-            self.refresh()
 
-    def show_progress(self, text: str) -> None:
-        self.session_button.set_state(SessionButton.BUSY, text)
-        QApplication.processEvents()
+        thread = QThread(self)
+        worker = _SessionWorker(task)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._on_task_progress)
+        worker.finished.connect(
+            lambda ok, error: self._on_task_finished(ok, error, on_done))
+        # Держим ссылки, пока поток жив, иначе Qt их уберёт сборщиком мусора.
+        self._task_thread = thread
+        self._task_worker = worker
+        thread.start()
+
+    def _on_task_progress(self, done: int, total: int, name: str) -> None:
+        self.session_button.set_state(SessionButton.BUSY, self._task_verb,
+                                      f"{name} · {done} из {total}")
+
+    def _on_task_finished(self, ok: bool, error: str,
+                          on_done: Callable[[bool], None] | None) -> None:
+        if self._task_thread is not None:
+            self._task_thread.quit()
+            self._task_thread.wait()
+            self._task_worker.deleteLater()
+            self._task_thread.deleteLater()
+            self._task_worker = None
+            self._task_thread = None
+        self._busy = False
+        self.session_button.setEnabled(True)
+        if not ok:
+            dialogs.inform(self, "Что-то пошло не так", error, dialogs.ERROR, dialogs.DANGER)
+        self.refresh()
+        if on_done is not None:
+            on_done(ok)
 
     def recover_after_restart(self) -> None:
         """Вызвать при запуске: компьютер могли выключить посреди сессии."""
@@ -583,16 +640,30 @@ class MainWindow(QMainWindow):
             return
 
         log.info("Компьютер выключился посреди сессии — выхожу из аккаунтов сейчас")
-        if self.end_session(confirm=False):
-            dialogs.inform(
-                self,
-                "Выход из аккаунтов выполнен",
-                "Компьютер выключился во время сессии, и программа не успела выйти "
-                "из аккаунтов. Сделала это сейчас — всё как было до сессии.",
-                dialogs.RESTORED,
-            )
+
+        def recovered(ok: bool) -> None:
+            if ok:
+                dialogs.inform(
+                    self,
+                    "Выход из аккаунтов выполнен",
+                    "Компьютер выключился во время сессии, и программа не успела выйти "
+                    "из аккаунтов. Сделала это сейчас — всё как было до сессии.",
+                    dialogs.RESTORED,
+                )
+
+        self.end_session(confirm=False, on_done=recovered)
 
     def on_system_shutdown(self, _manager=None) -> None:
+        hwnd = int(self.winId())
+        if self._busy:
+            # Идёт фоновый снимок/откат — дождёмся его, иначе запустили бы
+            # очистку второй раз поверх первой.
+            block_shutdown(hwnd, "Session Controller заканчивает операцию…")
+            while self._busy:
+                QApplication.processEvents()
+                QThread.msleep(20)
+            unblock_shutdown(hwnd)
+
         if not self.session.is_active:
             return
         if not self.settings.logout_on_shutdown:
@@ -600,7 +671,6 @@ class MainWindow(QMainWindow):
             return
 
         log.info("Windows завершает работу — выхожу из аккаунтов")
-        hwnd = int(self.winId())
         block_shutdown(hwnd, "Session Controller выходит из твоих аккаунтов…")
         try:
             self.session.end()
@@ -740,6 +810,8 @@ class MainWindow(QMainWindow):
             self.quit_app()
 
     def quit_app(self) -> None:
+        if self._busy:
+            return  # идёт операция — дождёмся её, потом можно выходить
         if self.session.is_active:
             box = dialogs.Dialog(
                 self,
@@ -756,11 +828,16 @@ class MainWindow(QMainWindow):
             )
             box.exec()
             if box.choice == "end":
-                if not self.end_session(confirm=False):
-                    return
-            elif box.choice != "keep":
+                # Выйдем, когда очистка закончится.
+                self.end_session(confirm=False,
+                                 on_done=lambda ok: self._finish_quit() if ok else None)
+                return
+            if box.choice != "keep":
                 return
 
+        self._finish_quit()
+
+    def _finish_quit(self) -> None:
         self._user_quit = True
         self.tray.hide()
         QApplication.quit()

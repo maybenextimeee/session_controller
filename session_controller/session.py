@@ -31,7 +31,9 @@ from session_controller.targets import CREDENTIALS, INTERNET_SETTINGS, Target
 
 log = logging.getLogger(__name__)
 
-Progress = Callable[[str], None]
+# Сообщает о ходе работы: сколько программ уже обработано, сколько всего и
+# какая обрабатывается сейчас. Нужно, чтобы интерфейс показывал прогресс.
+Progress = Callable[[int, int, str], None]
 
 
 class SessionError(Exception):
@@ -108,9 +110,9 @@ class Session:
 
         entries = []
         try:
-            for target in targets:
+            for index, target in enumerate(targets):
                 if progress:
-                    progress(f"Запоминаю: {target.name}…")
+                    progress(index + 1, len(targets), target.name)
                 entries.append(self._snapshot(target))
         except OSError as error:
             log.exception("Не удалось сделать снимок")
@@ -133,9 +135,9 @@ class Session:
         processes.close(targets)
 
         failed = []
-        for entry in self._entries:
+        for index, entry in enumerate(self._entries):
             if progress:
-                progress(f"Очищаю: {entry['name']}…")
+                progress(index + 1, len(self._entries), entry["name"])
             try:
                 self._restore(entry)
             except OSError:

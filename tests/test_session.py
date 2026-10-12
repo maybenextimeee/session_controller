@@ -352,3 +352,23 @@ def test_claude_app_and_claude_code_close_their_own_processes():
     assert targets["claude_code"].matches_exe(code_in_app)
     assert targets["claude_code"].matches_exe(code_alone)
     assert not targets["claude"].matches_exe(code_alone)
+
+
+def test_progress_reports_counts(home, tmp_path):
+    """Движок сообщает интерфейсу (сделано, всего, название) — для прогресса в окне."""
+    def make(name):
+        data = tmp_path / name
+        write(data / "login", name)
+        return Target(name, name, process_names=NO_PROCESS, paths=(data,))
+
+    targets = [make("Chrome"), make("Edge"), make("Firefox")]
+    session = Session(home, targets)
+
+    start_calls = []
+    session.start(targets, lambda done, total, name: start_calls.append((done, total, name)))
+    assert start_calls == [(1, 3, "Chrome"), (2, 3, "Edge"), (3, 3, "Firefox")]
+
+    end_calls = []
+    session.end(lambda done, total, name: end_calls.append((done, total, name)))
+    assert [c[0] for c in end_calls] == [1, 2, 3]
+    assert all(c[1] == 3 for c in end_calls)
