@@ -17,6 +17,10 @@ class Settings:
     disabled_targets: list[str] = field(default_factory=list)
     # Тема окна: "system" (как в Windows), "light" или "dark".
     theme: str = "system"
+    # Раз в сутки спрашивать GitHub, нет ли новой версии.
+    check_updates: bool = True
+    # Удалять в конце сессии то, что появилось за неё в «Загрузках».
+    clean_downloads: bool = False
 
     @classmethod
     def load(cls, path: Path) -> "Settings":

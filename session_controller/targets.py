@@ -18,6 +18,9 @@ APP = "app"
 VPN = "vpn"
 AI = "ai"
 CREDENTIALS = "credentials"
+# Папка «Загрузки»: не копируем её, а запоминаем список того, что в ней лежит,
+# и в конце удаляем появившееся за сессию. Включается галочкой в настройках.
+DOWNLOADS = "downloads"
 
 # Настройки прокси Windows. VPN-клиент в режиме «системный прокси» включает их,
 # и если закрыть его силой, прокси останется включённым на несуществующий адрес —
@@ -52,6 +55,9 @@ class Target:
     skip: tuple[str, ...] = ()
     # Значения реестра HKEY_CURRENT_USER: (раздел, имя значения).
     registry_values: tuple[tuple[str, str], ...] = ()
+    # Целые ветки реестра HKEY_CURRENT_USER — для программ, которые хранят там все
+    # настройки (так делают программы на Qt). Только вида Software\\<программа>.
+    registry_keys: tuple[str, ...] = ()
     # Где обычно лежит exe программы — из него берём значок для окна.
     # Не обязательно: значок ищется и по имени процесса (раздел реестра App Paths).
     exe_paths: tuple[Path, ...] = ()
@@ -59,7 +65,8 @@ class Target:
     def is_installed(self) -> bool:
         if self.kind == CREDENTIALS:
             return sys.platform == "win32"
-        return any(path.exists() for path in self.paths)
+        return (any(path.exists() for path in self.paths)
+                or any(registry.read_tree(key) is not None for key in self.registry_keys))
 
     def matches_exe(self, exe_path: str) -> bool:
         """Подходит ли путь к exe под exe_hint (без учёта регистра)."""
@@ -76,6 +83,13 @@ WINDOWS_CREDENTIALS = Target(
     hint="Пароли и токены, которые программы (Git, GitHub Desktop и др.)\n"
          "сохранили в Windows за время сессии",
 )
+
+
+def downloads_target(folder: Path) -> Target:
+    return Target(
+        "downloads", "Загрузки", kind=DOWNLOADS, paths=(folder,),
+        hint="Файлы и папки, которые появились в «Загрузках» за сессию",
+    )
 
 
 def known_targets() -> list[Target]:
@@ -247,6 +261,19 @@ def _vpn(local: Path, roaming: Path, home: Path | None) -> list[Target]:
             exe_hint="hiddify",
             registry_values=SYSTEM_PROXY,
             exe_paths=tuple(d / "Hiddify" / "Hiddify.exe" for d in (local / "Programs", *programs)),
+        ),
+        Target(
+            "amnezia", "AmneziaVPN", kind=VPN, hint=hint,
+            # Настройки (серверы и ключи, зашифрованные) — в реестре: так их хранит
+            # Qt по умолчанию. Ключ шифрования лежит в диспетчере учётных данных
+            # Windows («AmneziaVPN-Keychain») — его чистит карточка диспетчера.
+            registry_keys=(r"Software\AmneziaVPN.ORG",),
+            # Здесь Qt хранит прочие файлы программы (например, логи с адресами серверов).
+            paths=(roaming / "AmneziaVPN.ORG", local / "AmneziaVPN.ORG"),
+            # Служба AmneziaVPN-service работает от имени системы, её не трогаем.
+            process_names=("AmneziaVPN.exe",),
+            registry_values=SYSTEM_PROXY,
+            exe_paths=tuple(d / "AmneziaVPN" / "AmneziaVPN.exe" for d in programs),
         ),
         Target(
             "clash_verge", "Clash Verge", kind=VPN, hint=hint,

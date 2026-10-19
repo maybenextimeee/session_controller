@@ -3,16 +3,18 @@
 import getpass
 import logging
 import sys
+import threading
 from collections.abc import Callable
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from PySide6.QtCore import QLockFile, QObject, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import QFileInfo, QLockFile, QObject, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QIcon, QKeySequence, QShortcut
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
     QApplication,
+    QFileIconProvider,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -28,7 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from session_controller import __version__, autostart, dialogs, theme
+from session_controller import __version__, autostart, dialogs, theme, updates
 from session_controller.icons import make_icon, target_icon
 from session_controller.paths import app_home
 from session_controller.session import Session, SessionError
@@ -40,6 +42,7 @@ from session_controller.targets import (
     CREDENTIALS,
     VPN,
     Target,
+    downloads_target,
     known_targets,
 )
 from session_controller.widgets import (
@@ -56,6 +59,7 @@ from session_controller.widgets import (
 from session_controller.winapi import (
     block_shutdown,
     create_app_mutex,
+    downloads_folder,
     redraw_title_bar,
     unblock_shutdown,
 )
@@ -63,6 +67,8 @@ from session_controller.winapi import (
 log = logging.getLogger(__name__)
 
 APP_NAME = "Session Controller"
+# Сколько удаляемых файлов из «Загрузок» показывать в окне подтверждения.
+MAX_LISTED_DOWNLOADS = 6
 REPO_URL = "https://github.com/maybenextimeee/session_controller"
 # По этому имени установщик понимает, что программа запущена (AppMutex в installer.iss).
 APP_MUTEX = "SessionControllerMutex"
@@ -111,6 +117,35 @@ class _SessionWorker(QObject):
             self.finished.emit(False, str(error))
 
 
+class _UpdateChecker(QObject):
+    """Раз в сутки спрашивает GitHub о новой версии — в отдельном потоке, чтобы
+    окно не ждало медленный интернет."""
+
+    found = Signal(str, str)  # версия, ссылка на страницу загрузки
+
+    FIRST_CHECK_MS = 15_000            # через 15 секунд после запуска
+    INTERVAL_MS = 24 * 60 * 60 * 1000  # потом раз в сутки
+
+    def __init__(self, parent: QObject, enabled: Callable[[], bool]) -> None:
+        super().__init__(parent)
+        self._enabled = enabled
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self.check)
+
+    def start(self) -> None:
+        QTimer.singleShot(self.FIRST_CHECK_MS, self.check)
+        self._timer.start(self.INTERVAL_MS)
+
+    def check(self) -> None:
+        if self._enabled():
+            threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self) -> None:
+        release = updates.newer_release(__version__)
+        if release is not None:
+            self.found.emit(release.version, release.url)
+
+
 class MainWindow(QMainWindow):
     def __init__(
         self,
@@ -128,6 +163,9 @@ class MainWindow(QMainWindow):
         self._busy = False
         self._task_thread: QThread | None = None
         self._task_worker: _SessionWorker | None = None
+        self._update_url = REPO_URL + "/releases/latest"
+        self.update_checker = _UpdateChecker(self, lambda: self.settings.check_updates)
+        self.update_checker.found.connect(self.on_update_found)
 
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(make_icon())
@@ -214,10 +252,19 @@ class MainWindow(QMainWindow):
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
 
+        # Появляется, только если на GitHub вышла версия новее.
+        self.update_button = QPushButton()
+        self.update_button.setObjectName("updateButton")
+        self.update_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.update_button.setToolTip("Открыть страницу загрузки новой версии")
+        self.update_button.clicked.connect(self.open_update_page)
+        self.update_button.hide()
+
         header = QHBoxLayout()
         header.setSpacing(12)
         header.addWidget(logo)
         header.addLayout(title_box, 1)
+        header.addWidget(self.update_button)
         header.addWidget(settings_button)
 
         # Что очищать.
@@ -433,6 +480,24 @@ class MainWindow(QMainWindow):
             self.autostart_row.setEnabled(False)
         self.autostart_row.switch.toggled.connect(self.on_autostart_changed)
 
+        self.updates_row = SettingRow(
+            "Проверять обновления",
+            "Раз в день программа спрашивает GitHub, не вышла ли новая версия, и "
+            "показывает кнопку для загрузки. Никаких данных о тебе не отправляется.",
+        )
+        self.updates_row.switch.setChecked(self.settings.check_updates)
+        self.updates_row.switch.toggled.connect(self.on_check_updates_changed)
+
+        self.downloads_row = SettingRow(
+            "Удалять скачанное за сессию",
+            "В конце сессии насовсем, не в Корзину, удаляются файлы и папки, которые "
+            "появились в «Загрузках» за сессию. То, что лежало там раньше, не трогается. "
+            "Перед удалением кнопкой «Завершить сессию» покажем список, при выключении "
+            "компьютера удалим без вопросов. Действует с начала следующей сессии.",
+        )
+        self.downloads_row.switch.setChecked(self.settings.clean_downloads)
+        self.downloads_row.switch.toggled.connect(self.on_clean_downloads_changed)
+
         # О программе.
         about = QFrame()
         about.setObjectName("panel")
@@ -472,6 +537,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.shutdown_row)
         layout.addSpacing(8)
         layout.addWidget(self.autostart_row)
+        layout.addSpacing(8)
+        layout.addWidget(self.updates_row)
+        layout.addSpacing(8)
+        layout.addWidget(self.downloads_row)
         layout.addSpacing(22)
         layout.addWidget(_section_label("О программе"))
         layout.addSpacing(10)
@@ -555,6 +624,8 @@ class MainWindow(QMainWindow):
         ):
             return
 
+        if self.settings.clean_downloads:
+            targets = [*targets, downloads_target(downloads_folder())]
         self.run_task("Сохраняю", lambda progress: self.session.start(targets, progress))
 
     def end_session(self, confirm: bool = True,
@@ -564,6 +635,9 @@ class MainWindow(QMainWindow):
             running = self.session.running(self.session.session_targets())
             if running:
                 text += " Открытые программы закроются, несохранённое в них пропадёт."
+            downloads = self.session.new_downloads()
+            if downloads:
+                text += " Скачанное за сессию удалится из «Загрузок» насовсем."
             if not dialogs.confirm(
                 self,
                 "Завершить сессию?",
@@ -572,6 +646,8 @@ class MainWindow(QMainWindow):
                 dialogs.SIGN_OUT,
                 items=self._program_items(running),
                 items_title="Будут закрыты",
+                more_items=_download_items(downloads),
+                more_items_title=f"Удалится из «Загрузок»: {_count_files(len(downloads))}",
             ):
                 if on_done is not None:
                     on_done(False)
@@ -692,6 +768,33 @@ class MainWindow(QMainWindow):
         log.info("Выход при выключении: %s", "да" if checked else "нет")
         self.refresh()
 
+    def on_clean_downloads_changed(self, checked: bool) -> None:
+        self.settings.clean_downloads = checked
+        self.settings.save(self.settings_path)
+        log.info("Очистка «Загрузок»: %s", "да" if checked else "нет")
+
+    def on_check_updates_changed(self, checked: bool) -> None:
+        self.settings.check_updates = checked
+        self.settings.save(self.settings_path)
+        log.info("Проверка обновлений: %s", "да" if checked else "нет")
+        if checked:
+            self.update_checker.check()
+        else:
+            self.update_button.hide()
+
+    def start_update_checks(self) -> None:
+        self.update_checker.start()
+
+    def on_update_found(self, version: str, url: str) -> None:
+        if not self.settings.check_updates:
+            return
+        self._update_url = url
+        self.update_button.setText(f"Новая версия {version}")
+        self.update_button.show()
+
+    def open_update_page(self) -> None:
+        QDesktopServices.openUrl(QUrl(self._update_url))
+
     def on_autostart_changed(self, checked: bool) -> None:
         try:
             autostart.set_enabled(checked)
@@ -767,6 +870,7 @@ class MainWindow(QMainWindow):
 
         # Во время сессии список не меняется: он был зафиксирован при старте.
         self._set_targets_enabled(not active)
+        self.downloads_row.setEnabled(not active)
         for target_id, card in self.overlay_cards.items():
             card.switch.setChecked(self.target_cards[target_id].switch.isChecked())
         enabled = sum(card.switch.isChecked() for card in self.target_cards.values())
@@ -841,6 +945,27 @@ class MainWindow(QMainWindow):
         self._user_quit = True
         self.tray.hide()
         QApplication.quit()
+
+
+def _download_items(paths: list) -> list[tuple[QIcon, str]]:
+    """Файлы для окна подтверждения: со значками типа файла, не больше нескольких."""
+    provider = QFileIconProvider()
+    items = [(provider.icon(QFileInfo(str(p))), p.name) for p in paths[:MAX_LISTED_DOWNLOADS]]
+    rest = len(paths) - MAX_LISTED_DOWNLOADS
+    if rest > 0:
+        items.append((QIcon(), f"и ещё {_count_files(rest)}"))
+    return items
+
+
+def _count_files(count: int) -> str:
+    """«1 файл», «3 файла», «5 файлов» (папки тоже считаем файлами — так проще)."""
+    if count % 10 == 1 and count % 100 != 11:
+        word = "файл"
+    elif count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
+        word = "файла"
+    else:
+        word = "файлов"
+    return f"{count} {word}"
 
 
 def _section_label(text: str) -> QLabel:
@@ -948,6 +1073,8 @@ def _run(home: Path, minimized: bool, smoke_test: bool) -> int:
     else:
         window.show()
     QTimer.singleShot(0, window.recover_after_restart)
+    if not smoke_test:
+        window.start_update_checks()
 
     if smoke_test:
         QTimer.singleShot(1000, app.quit)

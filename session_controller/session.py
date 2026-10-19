@@ -27,7 +27,7 @@ from pathlib import Path
 import psutil
 
 from session_controller import credentials, processes, registry, snapshot, winapi
-from session_controller.targets import CREDENTIALS, INTERNET_SETTINGS, Target
+from session_controller.targets import CREDENTIALS, DOWNLOADS, INTERNET_SETTINGS, Target
 
 log = logging.getLogger(__name__)
 
@@ -173,6 +173,14 @@ class Session:
             entry["credentials"] = [list(item) for item in credentials.list_all()]
             return entry
 
+        if target.kind == DOWNLOADS:
+            # Саму папку не копируем — она бывает огромной. Хватит списка имён.
+            folder = target.paths[0]
+            entry["paths"].append({"path": str(folder), "existed": folder.is_dir()})
+            entry["downloads"] = _folder_names(folder)
+            log.info("Снимок: Загрузки (%s), там %d шт.", folder, len(entry["downloads"]))
+            return entry
+
         for index, path in enumerate(target.paths):
             existed = os.path.lexists(path)
             if existed:
@@ -183,11 +191,18 @@ class Session:
         for key, name in target.registry_values:
             entry["registry"].append({"key": key, "name": name, "value": registry.read(key, name)})
 
+        entry["registry_trees"] = [
+            {"key": key, "tree": registry.read_tree(key)} for key in target.registry_keys
+        ]
         return entry
 
     def _restore(self, entry: dict) -> None:
         if entry["kind"] == CREDENTIALS:
             _delete_new_credentials(entry["credentials"])
+            return
+
+        if entry["kind"] == DOWNLOADS:
+            _delete_new_downloads(Path(entry["paths"][0]["path"]), entry["downloads"])
             return
 
         for index, item in enumerate(entry["paths"]):
@@ -200,8 +215,18 @@ class Session:
 
         for item in entry["registry"]:
             registry.write(item["key"], item["name"], item["value"])
+        # В журналах старых версий веток реестра нет — поэтому .get.
+        for item in entry.get("registry_trees", []):
+            registry.write_tree(item["key"], item["tree"])
         if any(item["key"] == INTERNET_SETTINGS for item in entry["registry"]):
             winapi.notify_proxy_changed()
+
+    def new_downloads(self) -> list[Path]:
+        """Что появилось в «Загрузках» за сессию — если их очистка включена."""
+        for entry in self._entries:
+            if entry["kind"] == DOWNLOADS:
+                return new_downloads(Path(entry["paths"][0]["path"]), entry["downloads"])
+        return []
 
     def _backup_path(self, target_id: str, index: int) -> Path:
         return self.backup_root / target_id / str(index)
@@ -229,6 +254,45 @@ def _delete_new_credentials(before: list[list]) -> None:
         except OSError:
             # Не блокируем завершение сессии из-за одной записи — только пишем в лог.
             log.exception("Не удалось удалить запись %s", name)
+
+
+def _folder_names(folder: Path) -> list[str]:
+    """Что лежит в папке сейчас — только верхний уровень."""
+    try:
+        return sorted(item.name for item in folder.iterdir())
+    except FileNotFoundError:
+        return []
+
+
+def new_downloads(folder: Path, before: list[str]) -> list[Path]:
+    """Файлы и папки, которых не было в списке before.
+
+    Имена сравниваем без учёта регистра, как Windows: «Отчёт.pdf» и «отчёт.pdf» —
+    один и тот же файл, и его, раз он был до сессии, не трогаем.
+    """
+    known = {name.casefold() for name in before}
+    try:
+        return sorted((item for item in folder.iterdir() if item.name.casefold() not in known),
+                      key=lambda item: item.name.casefold())
+    except FileNotFoundError:
+        return []
+
+
+def _delete_new_downloads(folder: Path, before: list[str]) -> None:
+    """Удалить насовсем то, что появилось в «Загрузках» за сессию. Саму папку
+    и то, что лежало в ней раньше, не трогаем."""
+    failed = []
+    for item in new_downloads(folder, before):
+        try:
+            snapshot.remove(item)
+            log.info("Удалено из «Загрузок»: %s", item.name)
+        except OSError:
+            log.exception("Не удалось удалить из «Загрузок»: %s", item)
+            failed.append(item.name)
+    if failed:
+        # Скорее всего, файл открыт в другой программе. Журнал остаётся —
+        # завершение можно повторить, закрыв этот файл.
+        raise OSError("не удалось удалить " + ", ".join(failed))
 
 
 def _refuse_if_launched_from(targets: list[Target]) -> None:

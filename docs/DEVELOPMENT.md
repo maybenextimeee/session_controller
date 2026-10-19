@@ -92,6 +92,7 @@ session_controller/
 ├── snapshot.py     ← снимок папки или файла и откат к нему
 ├── registry.py     ← реестр Windows
 ├── credentials.py  ← диспетчер учётных данных Windows
+├── updates.py      ← проверка обновлений на GitHub
 ├── settings.py     ← настройки
 ├── paths.py        ← где лежат файлы программы
 ├── winapi.py       ← функции Windows, которых нет в Qt

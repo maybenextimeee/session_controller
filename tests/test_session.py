@@ -372,3 +372,107 @@ def test_progress_reports_counts(home, tmp_path):
     session.end(lambda done, total, name: end_calls.append((done, total, name)))
     assert [c[0] for c in end_calls] == [1, 2, 3]
     assert all(c[1] == 3 for c in end_calls)
+
+
+# ---------- «Загрузки» ----------
+
+def test_downloads_new_items_removed_old_kept(home, tmp_path):
+    folder = tmp_path / "Downloads"
+    write(folder / "old.txt", "old")
+    write(folder / "old_dir" / "inside.txt", "old")
+    target = targets_mod.downloads_target(folder)
+    session = Session(home, [target])
+    session.start([target])
+
+    write(folder / "new.pdf", "secret")
+    write(folder / "new_dir" / "inner.txt", "secret")
+    write(folder / "old.txt", "changed during session")
+    assert [p.name for p in session.new_downloads()] == ["new.pdf", "new_dir"]
+
+    session.end()
+    assert not (folder / "new.pdf").exists()
+    assert not (folder / "new_dir").exists()
+    # Что было до сессии — не трогаем, даже если файл меняли.
+    assert read(folder / "old.txt") == "changed during session"
+    assert (folder / "old_dir" / "inside.txt").exists()
+    assert folder.is_dir()
+
+
+def test_downloads_folder_itself_is_never_deleted(home, tmp_path):
+    folder = tmp_path / "Downloads"  # до сессии папки нет
+    target = targets_mod.downloads_target(folder)
+    session = Session(home, [target])
+    session.start([target])
+    write(folder / "new.zip", "secret")
+    session.end()
+    assert folder.is_dir()
+    assert list(folder.iterdir()) == []
+
+
+def test_downloads_locked_file_keeps_session(home, tmp_path, monkeypatch):
+    """Файл открыт в другой программе — сессия не теряется, завершение можно повторить."""
+    folder = tmp_path / "Downloads"
+    folder.mkdir()
+    target = targets_mod.downloads_target(folder)
+    session = Session(home, [target])
+    session.start([target])
+    write(folder / "open.docx", "secret")
+
+    real_remove = snapshot.remove
+
+    def locked(path):
+        raise PermissionError("файл открыт в Word")
+
+    monkeypatch.setattr(snapshot, "remove", locked)
+    with pytest.raises(SessionError, match="Загрузки"):
+        session.end()
+    assert session.is_active
+    assert (folder / "open.docx").exists()
+
+    monkeypatch.setattr(snapshot, "remove", real_remove)
+    reloaded = Session(home, [target])
+    reloaded.load()
+    reloaded.end()
+    assert not (folder / "open.docx").exists()
+
+
+def test_downloads_names_compare_like_windows(tmp_path):
+    """«Report.PDF» и «report.pdf» в Windows — один файл: он был до сессии."""
+    folder = tmp_path / "Downloads"
+    write(folder / "report.pdf", "old")
+    assert session_mod.new_downloads(folder, ["Report.PDF"]) == []
+
+
+def test_registry_trees_are_restored(home, monkeypatch):
+    """Программы на Qt (AmneziaVPN) хранят настройки целой веткой реестра."""
+    trees = {r"Software\Qt.ORG": {"values": {"server": {"type": 1, "data": "before"}},
+                                  "keys": {}}}
+    monkeypatch.setattr(registry, "read_tree", lambda key: trees.get(key))
+
+    def fake_write_tree(key, tree):
+        if tree is None:
+            trees.pop(key, None)
+        else:
+            trees[key] = tree
+
+    monkeypatch.setattr(registry, "write_tree", fake_write_tree)
+
+    existing = Target("qt", "Qt", process_names=NO_PROCESS, registry_keys=(r"Software\Qt.ORG",))
+    new_app = Target("new", "New", process_names=NO_PROCESS, registry_keys=(r"Software\New.ORG",))
+    session = Session(home, [existing, new_app])
+    session.start([existing, new_app])
+    trees[r"Software\Qt.ORG"] = {"values": {"server": {"type": 1, "data": "student"}}, "keys": {}}
+    trees[r"Software\New.ORG"] = {"values": {}, "keys": {}}  # программу поставили за сессию
+    session.end()
+
+    assert trees == {r"Software\Qt.ORG": {"values": {"server": {"type": 1, "data": "before"}},
+                                          "keys": {}}}
+
+
+def test_amnezia_target(tmp_path, monkeypatch):
+    for name in ("LOCALAPPDATA", "APPDATA", "USERPROFILE", "ProgramFiles", "ProgramFiles(x86)"):
+        monkeypatch.setenv(name, str(tmp_path / name))
+    amnezia = next(t for t in known_targets() if t.id == "amnezia")
+    assert amnezia.kind == targets_mod.VPN
+    assert amnezia.registry_keys == (r"Software\AmneziaVPN.ORG",)
+    assert targets_mod.SYSTEM_PROXY == amnezia.registry_values

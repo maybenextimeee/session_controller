@@ -2,6 +2,8 @@
 
 import logging
 import sys
+import uuid
+from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +26,19 @@ if sys.platform == "win32":
     _kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
     _kernel32.CreateMutexW.restype = wintypes.HANDLE
 
+    class _GUID(ctypes.Structure):
+        _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD),
+                    ("Data3", wintypes.WORD), ("Data4", ctypes.c_ubyte * 8)]
+
+    _shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    _shell32.SHGetKnownFolderPath.argtypes = [
+        ctypes.POINTER(_GUID), wintypes.DWORD, wintypes.HANDLE, ctypes.POINTER(ctypes.c_wchar_p),
+    ]
+    _shell32.SHGetKnownFolderPath.restype = ctypes.c_long
+    _ole32 = ctypes.WinDLL("ole32", use_last_error=True)
+    _ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+    _ole32.CoTaskMemFree.restype = None
+
     _wininet = ctypes.WinDLL("wininet", use_last_error=True)
     _wininet.InternetSetOptionW.argtypes = [
         ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
@@ -33,6 +48,27 @@ if sys.platform == "win32":
 WM_NCACTIVATE = 0x0086
 INTERNET_OPTION_REFRESH = 37
 INTERNET_OPTION_SETTINGS_CHANGED = 39
+_FOLDERID_DOWNLOADS = "{374DE290-123F-4565-9164-39C4925E467B}"
+
+
+def downloads_folder() -> Path:
+    """Папка «Загрузки» текущего пользователя.
+
+    Её можно перенести (например, на другой диск), поэтому спрашиваем Windows,
+    а не берём «C:\\Users\\<имя>\\Downloads» наугад.
+    """
+    if sys.platform == "win32":
+        guid_value = uuid.UUID(_FOLDERID_DOWNLOADS)
+        guid = _GUID(guid_value.time_low, guid_value.time_mid, guid_value.time_hi_version,
+                     (ctypes.c_ubyte * 8)(*guid_value.bytes[8:]))
+        path = ctypes.c_wchar_p()
+        if _shell32.SHGetKnownFolderPath(ctypes.byref(guid), 0, None, ctypes.byref(path)) == 0:
+            try:
+                return Path(path.value)
+            finally:
+                _ole32.CoTaskMemFree(ctypes.cast(path, ctypes.c_void_p))
+        log.warning("SHGetKnownFolderPath(Downloads) не сработал — беру папку по умолчанию")
+    return Path.home() / "Downloads"
 
 
 def notify_proxy_changed() -> None:

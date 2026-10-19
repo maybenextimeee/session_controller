@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 
 from session_controller import theme
 from session_controller.icons import make_icon
-from session_controller.widgets import Background
+from session_controller.widgets import Background, ElidedLabel
 
 APP_NAME = "Session Controller"
 
@@ -101,6 +101,8 @@ class Dialog(QDialog):
         tone: str = ACCENT,
         items: list[tuple[QIcon, str]] = (),
         items_title: str = "",
+        more_items: list[tuple[QIcon, str]] = (),
+        more_items_title: str = "",
     ) -> None:
         super().__init__(parent)
         self.choice: str | None = None
@@ -134,6 +136,10 @@ class Dialog(QDialog):
         if items:
             layout.addSpacing(16)
             layout.addWidget(_items_panel(items, items_title))
+        if more_items:
+            # Второй список — например, файлы: имена длинные, поэтому в одну колонку.
+            layout.addSpacing(10)
+            layout.addWidget(_items_panel(more_items, more_items_title, columns=1))
         layout.addSpacing(22)
 
         row = QHBoxLayout()
@@ -160,8 +166,8 @@ class Dialog(QDialog):
         self.accept()
 
 
-def _items_panel(items: list[tuple[QIcon, str]], title: str) -> QFrame:
-    """Список программ со значками в две колонки."""
+def _items_panel(items: list[tuple[QIcon, str]], title: str, columns: int = 2) -> QFrame:
+    """Список со значками (программы — в две колонки, файлы — в одну)."""
     panel = QFrame()
     panel.setObjectName("itemsPanel")
     layout = QVBoxLayout(panel)
@@ -178,12 +184,13 @@ def _items_panel(items: list[tuple[QIcon, str]], title: str) -> QFrame:
         icon_label = QLabel()
         icon_label.setFixedSize(18, 18)
         icon_label.setPixmap(icon.pixmap(18, 18))
-        name_label = QLabel(name)
+        # Длинное имя заканчивается на «…», а не растягивает окно.
+        name_label = ElidedLabel(name)
         cell = QHBoxLayout()
         cell.setSpacing(8)
         cell.addWidget(icon_label)
         cell.addWidget(name_label, 1)
-        grid.addLayout(cell, index // 2, index % 2)
+        grid.addLayout(cell, index // columns, index % columns)
     grid.setColumnStretch(0, 1)
     grid.setColumnStretch(1, 1)
     layout.addLayout(grid)
@@ -199,12 +206,14 @@ def confirm(
     tone: str = ACCENT,
     items: list[tuple[QIcon, str]] = (),
     items_title: str = "",
+    more_items: list[tuple[QIcon, str]] = (),
+    more_items_title: str = "",
 ) -> bool:
     """Спросить «да или нет». True — нажали кнопку подтверждения."""
     dialog = Dialog(
         parent, heading, text,
         [Button("cancel", "Отмена"), Button("ok", confirm_text, PRIMARY)],
-        glyph, tone, items, items_title,
+        glyph, tone, items, items_title, more_items, more_items_title,
     )
     dialog.exec()
     return dialog.choice == "ok"

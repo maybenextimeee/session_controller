@@ -404,6 +404,17 @@ QScrollBar::handle:vertical:hover {{ background: {t.dim}; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
 
+QPushButton#updateButton {{
+    background: {t.selected_bg};
+    border: 1px solid {t.selected_border};
+    border-radius: 15px;
+    padding: 6px 13px;
+    min-width: 0;
+    color: {t.accent};
+    font-weight: 600;
+}}
+QPushButton#updateButton:hover {{ border-color: {t.accent}; }}
+
 QPushButton#linkButton {{
     background: transparent;
     border: none;

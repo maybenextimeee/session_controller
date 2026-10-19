@@ -25,11 +25,39 @@ TEST_KEY = r"Software\SessionControllerTest"
 @pytest.fixture
 def registry_key():
     yield TEST_KEY
+    registry.delete_tree(TEST_KEY)  # с подразделами, если тест их создал
+
+
+def test_registry_tree_roundtrip(registry_key):
+    """Целую ветку можно запомнить и вернуть: новое удаляется, изменённое — назад."""
     import winreg
-    try:
-        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, TEST_KEY)
-    except FileNotFoundError:
-        pass
+
+    def put(key, name, kind, data):
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key) as handle:
+            winreg.SetValueEx(handle, name, 0, kind, data)
+
+    put(registry_key, "server", winreg.REG_SZ, "before")
+    put(registry_key + r"\servers\0", "key", winreg.REG_BINARY, b"\x01\x02")
+    put(registry_key + r"\servers\0", "port", winreg.REG_DWORD, 51820)
+    before = registry.read_tree(registry_key)
+
+    # «Во время сессии»: меняем, добавляем значения и целые подразделы.
+    put(registry_key, "server", winreg.REG_SZ, "student")
+    put(registry_key, "token", winreg.REG_SZ, "secret")
+    put(registry_key + r"\servers\1", "key", winreg.REG_SZ, "secret")
+    assert registry.read_tree(registry_key) != before
+
+    registry.write_tree(registry_key, before)
+    assert registry.read_tree(registry_key) == before
+
+    registry.write_tree(registry_key, None)  # ветки до сессии не было
+    assert registry.read_tree(registry_key) is None
+
+
+def test_registry_tree_refuses_dangerous_keys():
+    for key in ("Software", "", r"System\CurrentControlSet"):
+        with pytest.raises(ValueError):
+            registry.delete_tree(key)
 
 
 def test_registry_roundtrip(registry_key):

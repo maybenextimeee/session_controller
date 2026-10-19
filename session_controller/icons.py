@@ -38,6 +38,7 @@ _MONOGRAMS = {
     "v2raytun": ("#1f8ef1", "V"),
     "hiddify": ("#4b6bfb", "H"),
     "clash_verge": ("#5b5bd6", "C"),
+    "amnezia": ("#e8513d", "A"),
     "claude": ("#d97757", "C"),
     "claude_code": ("#d97757", "CLI"),
     "chatgpt": ("#10a37f", "GPT"),
