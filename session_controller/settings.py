@@ -33,6 +33,12 @@ class Settings:
             return cls()
         if not isinstance(data, dict):
             return cls()
+        disabled = data.get("disabled_targets")
+        if isinstance(disabled, list) and ("chatgpt" in disabled or "codex" in disabled):
+            # Один переключатель не должен заново включать отключённую очистку.
+            data["disabled_targets"] = [
+                target for target in disabled if target not in ("chatgpt", "codex", "chatgpt_codex")
+            ] + ["chatgpt_codex"]
         known = {f.name for f in fields(cls)}
         return cls(**{key: value for key, value in data.items() if key in known})
 

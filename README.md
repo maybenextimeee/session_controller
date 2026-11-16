@@ -44,7 +44,7 @@
 | VS Code | Вход в GitHub / Microsoft, настройки, история |
 | Git и GitHub | Настройки Git (имя, почта), SSH-ключи, вход в GitHub CLI и GitHub Desktop |
 | VPN: Happ, v2RayTun, Hiddify, Clash Verge, AmneziaVPN | Подписки, ключи, серверы. Настройки прокси Windows возвращаются как были |
-| ИИ: Claude for Desktop, Claude Code, ChatGPT, Codex, Cursor | Вход, чаты, настройки |
+| ИИ: Claude for Desktop, Claude Code, ChatGPT и Codex, Cursor, Google Antigravity и Antigravity IDE | Вход, чаты, настройки в поддерживаемых папках. Современная папка Claude Desktop `Claude-Data` не очищается |
 | Диспетчер учётных данных Windows | Пароли и токены, которые программы сохранили за сессию |
 
 В окне показаны программы, найденные на компьютере, — любую можно выключить

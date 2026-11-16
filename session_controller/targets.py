@@ -7,11 +7,12 @@
 """
 
 import os
+import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from session_controller import registry
+from session_controller import registry, winapi
 
 BROWSER = "browser"
 APP = "app"
@@ -34,6 +35,9 @@ SYSTEM_PROXY = tuple(
 # Где Windows записывает, куда установлены приложения из Microsoft Store.
 STORE_PACKAGES = (r"Software\Classes\Local Settings\Software\Microsoft\Windows"
                   r"\CurrentVersion\AppModel\Repository\Packages")
+CLAUDE_PACKAGE = "Claude_pzs8sxrjxfjjc"
+CHATGPT_PACKAGE = "OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0"
+CODEX_PACKAGE = "OpenAI.Codex_2p2nqsd0c76g0"
 
 
 @dataclass(frozen=True)
@@ -58,14 +62,18 @@ class Target:
     # Целые ветки реестра HKEY_CURRENT_USER — для программ, которые хранят там все
     # настройки (так делают программы на Qt). Только вида Software\\<программа>.
     registry_keys: tuple[str, ...] = ()
-    # Где обычно лежит exe программы — из него берём значок для окна.
-    # Не обязательно: значок ищется и по имени процесса (раздел реестра App Paths).
+    # Известные пути к exe для обнаружения установленной программы.
     exe_paths: tuple[Path, ...] = ()
+    # Признаки установки, которые не входят в снимок сессии.
+    install_paths: tuple[Path, ...] = ()
+    package_families: tuple[str, ...] = ()
 
     def is_installed(self) -> bool:
         if self.kind == CREDENTIALS:
             return sys.platform == "win32"
-        return (any(path.exists() for path in self.paths)
+        return (any(path.exists() for path in (*self.paths, *self.install_paths))
+                or any(_is_executable(path) for path in self.exe_paths)
+                or any(winapi.is_package_installed(family) for family in self.package_families)
                 or any(registry.read_tree(key) is not None for key in self.registry_keys))
 
     def matches_exe(self, exe_path: str) -> bool:
@@ -208,6 +216,8 @@ def _apps(local: Path, roaming: Path, home: Path | None) -> list[Target]:
 
 def _git(home: Path, roaming: Path, local: Path | None) -> Target:
     desktop = (local / "GitHubDesktop" / "GitHubDesktop.exe",) if local else ()
+    git_commands = tuple(Path(path) for name in ("git.exe", "gh.exe") if (path := shutil.which(name)))
+    install_roots = (local / "Programs", *_program_files()) if local else _program_files()
     return Target(
         "git", "Git и GitHub",
         hint="Настройки Git (имя, почта), SSH-ключи,\n"
@@ -220,7 +230,9 @@ def _git(home: Path, roaming: Path, local: Path | None) -> Target:
             roaming / "GitHub Desktop",
         ),
         process_names=("GitHubDesktop.exe",),
-        exe_paths=(*desktop, *(d / "Git" / "git-bash.exe" for d in _program_files())),
+        exe_paths=(
+            *desktop, *(d / "Git" / "git-bash.exe" for d in install_roots), *git_commands,
+        ),
     )
 
 
@@ -233,13 +245,16 @@ def _vpn(local: Path, roaming: Path, home: Path | None) -> list[Target]:
     return [
         Target(
             "happ", "Happ", kind=VPN, hint=hint,
-            # Happ ставится прямо в эту папку вместе со своими данными.
-            paths=(roaming / "Happ",),
+            paths=(roaming / "Happ", local / "Happ"),
             process_names=("Happ.exe", "xray.exe", "sing-box.exe", "antifilter.exe"),
             # xray.exe и sing-box.exe бывают и у других клиентов — закрываем только свои.
             exe_hint="\\happ\\",
             registry_values=SYSTEM_PROXY,
-            exe_paths=(roaming / "Happ" / "Happ.exe",),
+            exe_paths=(
+                *(d / "FlyFrogLLC" / "Happ" / "Happ.exe"
+                  for d in (local / "Programs", *programs)),
+                *(d / "Happ" / "Happ.exe" for d in (roaming, local / "Programs", *programs)),
+            ),
         ),
         Target(
             "v2raytun", "v2RayTun", kind=VPN, hint=hint,
@@ -287,28 +302,39 @@ def _vpn(local: Path, roaming: Path, home: Path | None) -> list[Target]:
 
 def _ai(local: Path, roaming: Path, home: Path | None) -> list[Target]:
     vscode_cache = ("CachedData", "CachedExtensionVSIXs", "CachedProfilesData", "logs")
+    antigravity_home = (home / ".gemini" / "antigravity",) if home else ()
+    antigravity_variants = ("Antigravity", "Antigravity IDE")
     claude_code_home = (home / ".claude", home / ".claude.json") if home else ()
     codex_home = (home / ".codex",) if home else ()
+    claude_roots = _store_install_dirs("Claude_")
+    openai_roots = (*_store_install_dirs("OpenAI.ChatGPT-Desktop_"),
+                    *_store_install_dirs("OpenAI.Codex_"))
+    openai_data = (*_store_data(local, "OpenAI.ChatGPT-Desktop", CHATGPT_PACKAGE),
+                   *_store_data(local, "OpenAI.Codex", CODEX_PACKAGE))
     return [
         Target(
             "claude", "Claude for Desktop", kind=AI,
             hint="Вход в приложение Claude, чаты, настройки.\n"
-                 "Встроенный в приложение Claude Code оно скачает заново.",
+                 "Папка Claude-Data (включая задачи и файлы Cowork) не очищается.",
             paths=(
                 # Версия из Microsoft Store хранит данные внутри своего пакета.
                 *(d / "LocalCache" / "Roaming" / "Claude"
-                  for d in _store_data(local, "Claude", "Claude_pzs8sxrjxfjjc")),
+                  for d in _store_data(local, "Claude", CLAUDE_PACKAGE)),
                 roaming / "Claude",
             ),
-            process_names=("claude.exe",),
+            install_paths=(local / "Claude-Data" / CLAUDE_PACKAGE.lower(),),
+            package_families=(CLAUDE_PACKAGE,),
+            process_names=("claude.exe", "claude-desktop.exe"),
             # claude.exe — и у приложения, и у Claude Code; приложение узнаём по
             # пакету из Microsoft Store или по папке старой версии.
             exe_hint="pzs8sxrjxfjjc|anthropicclaude",
             # Встроенная копия Claude Code весит сотни мегабайт, входов в ней нет.
             skip=("claude-code", "vm_bundles", "logs"),
             exe_paths=(
-                *(d / "app" / "claude.exe" for d in _store_install_dirs("Claude_")),
+                *(d / app / name for d in claude_roots for app in ("", "app")
+                  for name in ("Claude.exe", "claude-desktop.exe")),
                 local / "AnthropicClaude" / "claude.exe",
+                *_newest(local / "AnthropicClaude", "app-*/claude.exe"),
             ),
         ),
         Target(
@@ -319,37 +345,20 @@ def _ai(local: Path, roaming: Path, home: Path | None) -> list[Target]:
             process_names=("claude.exe",),
             # Отдельно установленный Claude Code и копия внутри приложения Claude.
             exe_hint="\\.local\\bin\\|\\claude-code\\",
+            exe_paths=(home / ".local" / "bin" / "claude.exe",) if home else (),
         ),
         Target(
-            "chatgpt", "ChatGPT", kind=AI,
-            hint="Вход в ChatGPT, история и настройки",
-            paths=tuple(
-                d / part
-                for d in _store_data(local, "OpenAI.ChatGPT-Desktop",
-                                     "OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0")
-                for part in ("LocalCache", "LocalState")
-            ),
-            process_names=("ChatGPT.exe",),
-            exe_paths=tuple(
-                d / name
-                for d in _store_install_dirs("OpenAI.ChatGPT")
-                for name in ("ChatGPT.exe", "app/ChatGPT.exe")
-            ),
-        ),
-        Target(
-            "codex", "Codex", kind=AI,
-            hint="Вход в Codex, история и настройки",
+            "chatgpt_codex", "ChatGPT и Codex", kind=AI,
+            hint="Входы, история и настройки ChatGPT и Codex, включая Codex CLI",
             paths=(
-                # И приложение Codex, и консольная версия хранят вход здесь.
                 *codex_home,
-                *(d / part for d in _store_data(local, "OpenAI.Codex")
-                  for part in ("LocalCache", "LocalState")),
+                *(d / part for d in openai_data for part in ("LocalCache", "LocalState")),
             ),
-            process_names=("codex.exe",),
+            package_families=(CHATGPT_PACKAGE, CODEX_PACKAGE),
+            process_names=("ChatGPT.exe", "Codex.exe"),
             exe_paths=tuple(
-                d / name
-                for d in _store_install_dirs("OpenAI.Codex")
-                for name in ("Codex.exe", "app/Codex.exe")
+                d / app / name for d in openai_roots for app in ("", "app")
+                for name in ("ChatGPT.exe", "Codex.exe")
             ),
         ),
         Target(
@@ -360,6 +369,24 @@ def _ai(local: Path, roaming: Path, home: Path | None) -> list[Target]:
             process_names=("Cursor.exe",),
             skip=vscode_cache,
             exe_paths=(local / "Programs" / "cursor" / "Cursor.exe",),
+        ),
+        Target(
+            "antigravity", "Google Antigravity", kind=AI,
+            hint="Вход, история и настройки Antigravity и Antigravity IDE.\n"
+                 "Несохранённые изменения в редакторе могут пропасть.",
+            paths=(*(roaming / name for name in antigravity_variants), *antigravity_home),
+            process_names=("Antigravity.exe", "Antigravity IDE.exe", "language_server.exe",
+                           "language_server_windows_x64.exe", "language_server_windows_arm64.exe",
+                           "webm_encoder.exe"),
+            # Имена вспомогательных процессов встречаются и у других приложений.
+            exe_hint="\\antigravity\\|\\antigravity ide\\|\\google antigravity\\",
+            skip=(*vscode_cache, "GPUPersistentCache"),
+            exe_paths=tuple(
+                root / folder / f"{name}.exe"
+                for root in (local / "Programs", *_program_files())
+                for name in antigravity_variants
+                for folder in dict.fromkeys((name, "Antigravity"))
+            ),
         ),
     ]
 
@@ -389,6 +416,14 @@ def _store_install_dirs(prefix: str) -> tuple[Path, ...]:
             if root:
                 dirs.append(Path(root))
     return tuple(dirs)
+
+
+def _is_executable(path: Path) -> bool:
+    try:
+        return path.is_file()
+    except OSError:
+        # WindowsApps может запрещать проверку файла внутри пакета.
+        return False
 
 
 def _steam_dir() -> Path | None:

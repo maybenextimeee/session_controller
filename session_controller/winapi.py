@@ -25,6 +25,11 @@ if sys.platform == "win32":
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     _kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
     _kernel32.CreateMutexW.restype = wintypes.HANDLE
+    _kernel32.GetPackagesByPackageFamily.argtypes = [
+        wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(wintypes.LPWSTR),
+        ctypes.POINTER(ctypes.c_uint32), wintypes.LPWSTR,
+    ]
+    _kernel32.GetPackagesByPackageFamily.restype = wintypes.LONG
 
     class _GUID(ctypes.Structure):
         _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD),
@@ -49,6 +54,19 @@ WM_NCACTIVATE = 0x0086
 INTERNET_OPTION_REFRESH = 37
 INTERNET_OPTION_SETTINGS_CHANGED = 39
 _FOLDERID_DOWNLOADS = "{374DE290-123F-4565-9164-39C4925E467B}"
+_ERROR_INSUFFICIENT_BUFFER = 122
+
+
+def is_package_installed(family: str) -> bool:
+    """Проверить регистрацию MSIX-пакета у текущего пользователя."""
+    if sys.platform != "win32":
+        return False
+    count = ctypes.c_uint32()
+    length = ctypes.c_uint32()
+    result = _kernel32.GetPackagesByPackageFamily(
+        family, ctypes.byref(count), None, ctypes.byref(length), None,
+    )
+    return result == _ERROR_INSUFFICIENT_BUFFER and count.value > 0
 
 
 def downloads_folder() -> Path:

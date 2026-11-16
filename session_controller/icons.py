@@ -1,105 +1,29 @@
 """Значки: самой программы и программ из списка «Что очищать».
 
-Значки браузеров и приложений берём прямо из их exe, как это делает Проводник:
-так они всегда настоящие и не нужно хранить чужие логотипы в репозитории.
-Если exe не нашёлся — рисуем цветной квадрат с буквами.
+Значки карточек хранятся в сборке и доступны без подключения к интернету.
 """
 
 import math
-import sys
 from pathlib import Path
 
-from PySide6.QtCore import QFileInfo, QPointF, QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QIcon, QLinearGradient, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QFileIconProvider
 
 from session_controller import theme
 from session_controller.targets import Target
 
-if sys.platform == "win32":
-    import winreg
-
-# Для запасного значка: фирменный цвет и буквы.
-_MONOGRAMS = {
-    "chrome": ("#4285f4", "G"),
-    "edge": ("#0c88d8", "E"),
-    "yandex": ("#fc3f1d", "Я"),
-    "brave": ("#fb542b", "B"),
-    "vivaldi": ("#ef3939", "V"),
-    "opera": ("#ff1b2d", "O"),
-    "opera_gx": ("#fa1e4e", "GX"),
-    "firefox": ("#ff7139", "F"),
-    "telegram": ("#26a5e4", "T"),
-    "discord": ("#5865f2", "D"),
-    "vscode": ("#007acc", "VS"),
-    "steam": ("#2a475e", "S"),
-    "git": ("#f05032", "G"),
-    "happ": ("#2f80ed", "H"),
-    "v2raytun": ("#1f8ef1", "V"),
-    "hiddify": ("#4b6bfb", "H"),
-    "clash_verge": ("#5b5bd6", "C"),
-    "amnezia": ("#e8513d", "A"),
-    "claude": ("#d97757", "C"),
-    "claude_code": ("#d97757", "CLI"),
-    "chatgpt": ("#10a37f", "GPT"),
-    "codex": ("#202123", "Cx"),
-    "cursor": ("#1f1f1f", "Cu"),
-}
-
-# Этим программам всегда рисуем плашку с буквами, даже если exe нашёлся:
-# у Claude Code значок как у приложения Claude — подпись «CLI» их различает.
-_LETTERS_ONLY = {"claude_code"}
-
-# Значок «ключ» из шрифта значков Windows (Segoe MDL2 Assets / Segoe Fluent Icons).
-_KEY_GLYPH = "\ue8d7"
-_WINDOWS_BLUE = "#0078d4"
-
+_ICONS_DIR = Path(__file__).with_name("app_icons")
 _cache: dict[str, QIcon] = {}
 _app_icon: QIcon | None = None
 
 
-def target_icon(target: Target, icon_font: str = "") -> QIcon:
-    if target.id in _cache:
-        return _cache[target.id]
-
-    exe = None if target.id in _LETTERS_ONLY else _find_exe(target)
-    icon = QFileIconProvider().icon(QFileInfo(str(exe))) if exe else QIcon()
-    if icon.isNull():
-        if target.id == "windows_credentials" and icon_font:
-            icon = _glyph_tile(_WINDOWS_BLUE, _KEY_GLYPH, icon_font)
-        else:
-            color, letters = _MONOGRAMS.get(target.id, ("#5d6579", target.name[:1].upper()))
-            icon = _letter_tile(color, letters)
-    _cache[target.id] = icon
-    return icon
-
-
-def _find_exe(target: Target) -> Path | None:
-    for path in target.exe_paths:
-        if path.is_file():
-            return path
-    for process in target.process_names:
-        path = _app_path(process)
-        if path and target.matches_exe(str(path)):
-            return path
-    return None
-
-
-def _app_path(exe_name: str) -> Path | None:
-    """Где установлена программа, по разделу реестра App Paths (его заполняют установщики)."""
-    if sys.platform != "win32":
-        return None
-    key = rf"Software\Microsoft\Windows\CurrentVersion\App Paths\{exe_name}"
-    for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
-        try:
-            with winreg.OpenKey(root, key) as handle:
-                value, _kind = winreg.QueryValueEx(handle, "")
-        except OSError:
-            continue
-        path = Path(str(value).strip('"'))
-        if path.is_file():
-            return path
-    return None
+def target_icon(target: Target) -> QIcon:
+    if target.id not in _cache:
+        icon = QIcon(str(_ICONS_DIR / f"{target.id}.png"))
+        if icon.isNull():
+            icon = _letter_tile("#5d6579", target.name[:1].upper())
+        _cache[target.id] = icon
+    return _cache[target.id]
 
 
 def _letter_tile(color: str, letters: str) -> QIcon:
@@ -111,18 +35,6 @@ def _letter_tile(color: str, letters: str) -> QIcon:
     painter.setFont(font)
     painter.setPen(QColor("white"))
     painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, letters)
-    painter.end()
-    return QIcon(pixmap)
-
-
-def _glyph_tile(color: str, glyph: str, icon_font: str) -> QIcon:
-    size = 64
-    pixmap, painter = _tile(QColor(color), size)
-    font = QFont(icon_font)
-    font.setPixelSize(int(size * 0.5))
-    painter.setFont(font)
-    painter.setPen(QColor("white"))
-    painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, glyph)
     painter.end()
     return QIcon(pixmap)
 

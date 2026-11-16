@@ -90,7 +90,7 @@ WINDOW_MARGINS = (22, 18, 22, 22)  # слева, сверху, справа, с�
 MIN_GRID_CARDS = 6
 # В каком порядке добирать: сначала самые нужные в аудитории.
 FILLER_ORDER = ("telegram", "steam", "discord", "vscode", "git", "claude", "claude_code",
-                "chatgpt", "codex", "happ", "v2raytun", "hiddify", "chrome", "firefox",
+                "chatgpt_codex", "antigravity", "happ", "v2raytun", "hiddify", "chrome", "firefox",
                 "yandex", "edge")
 
 
@@ -354,7 +354,7 @@ class MainWindow(QMainWindow):
         self.resize(CONTENT_WIDTH + left + right, max(height, self.minimumHeight()))
 
     def _target_card(self, target: Target, installed: bool) -> TargetCard:
-        return TargetCard(target_icon(target, theme.fonts().icons), target.name, target.hint,
+        return TargetCard(target_icon(target), target.name, target.hint,
                           installed=installed)
 
     def _build_apps_overlay(self, parent: QWidget) -> Overlay:
@@ -835,6 +835,8 @@ class MainWindow(QMainWindow):
 
     def on_targets_changed(self) -> None:
         self.settings.disabled_targets = [
+            target_id for target_id in self.settings.disabled_targets if target_id not in self.target_cards
+        ] + [
             target_id for target_id, card in self.target_cards.items()
             if not card.switch.isChecked()
         ]
@@ -884,8 +886,7 @@ class MainWindow(QMainWindow):
 
     def _program_items(self, targets: list[Target]) -> list[tuple[QIcon, str]]:
         """Значки и названия программ — для списка в окне-вопросе."""
-        icon_font = theme.fonts().icons
-        return [(target_icon(t, icon_font), t.name) for t in targets]
+        return [(target_icon(t), t.name) for t in targets]
 
     def _set_targets_enabled(self, enabled: bool) -> None:
         for card in (*self.target_cards.values(), *self.overlay_cards.values()):

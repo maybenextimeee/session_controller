@@ -331,13 +331,94 @@ def test_vpn_and_ai_targets(tmp_path, monkeypatch):
         assert targets[vpn_id].kind == targets_mod.VPN
         assert targets_mod.SYSTEM_PROXY == targets[vpn_id].registry_values
     assert package / "LocalCache" / "Roaming" / "Claude" in targets["claude"].paths
-    # Каждая программа — отдельная карточка: Claude ≠ Claude Code, ChatGPT ≠ Codex.
+    # У Claude Desktop и Claude Code отдельные настройки очистки.
     assert tmp_path / "USERPROFILE" / ".claude" in targets["claude_code"].paths
     assert tmp_path / "USERPROFILE" / ".claude" not in targets["claude"].paths
-    # ChatGPT ещё не установлен — под защитой его известная папка пакета.
-    assert any("OpenAI.ChatGPT-Desktop_" in str(p) for p in targets["chatgpt"].paths)
-    assert tmp_path / "USERPROFILE" / ".codex" in targets["codex"].paths
-    assert tmp_path / "USERPROFILE" / ".codex" not in targets["chatgpt"].paths
+    combined = targets["chatgpt_codex"]
+    assert "chatgpt" not in targets and "codex" not in targets
+    assert tmp_path / "USERPROFILE" / ".codex" in combined.paths
+    assert set(combined.process_names) == {"ChatGPT.exe", "Codex.exe"}
+    # Известные папки обоих пакетов записываются в снимок даже до установки.
+    packages = tmp_path / "LOCALAPPDATA" / "Packages"
+    for family in (targets_mod.CHATGPT_PACKAGE, targets_mod.CODEX_PACKAGE):
+        for folder in ("LocalCache", "LocalState"):
+            assert packages / family / folder in combined.paths
+
+
+def test_installed_targets_without_legacy_profile_data(tmp_path, monkeypatch):
+    local = tmp_path / "local"
+    programs = tmp_path / "programs"
+    for name, path in {
+        "LOCALAPPDATA": local, "APPDATA": tmp_path / "roaming",
+        "USERPROFILE": tmp_path / "home", "ProgramFiles": programs,
+        "ProgramFiles(x86)": programs,
+    }.items():
+        monkeypatch.setenv(name, str(path))
+    monkeypatch.setattr(targets_mod.shutil, "which", lambda name: None)
+    monkeypatch.setattr(targets_mod.registry, "subkeys", lambda key: [])
+    monkeypatch.setattr(targets_mod.winapi, "is_package_installed", lambda family: False)
+    targets = {target.id: target for target in known_targets()}
+    ids = ("git", "happ", "claude", "chatgpt_codex")
+    assert not any(targets[target_id].is_installed() for target_id in ids)
+
+    write(programs / "Git" / "git-bash.exe", "")
+    write(programs / "FlyFrogLLC" / "Happ" / "Happ.exe", "")
+    claude_data = local / "Claude-Data" / targets_mod.CLAUDE_PACKAGE.lower()
+    write(claude_data / "Preferences", "")
+    monkeypatch.setattr(targets_mod.winapi, "is_package_installed",
+                        lambda family: family == targets_mod.CODEX_PACKAGE)
+    assert all(targets[target_id].is_installed() for target_id in ids)
+    assert claude_data not in targets["claude"].paths
+
+
+@pytest.mark.parametrize(("root", "variant"), [
+    ("LOCALAPPDATA", "Antigravity"),
+    ("ProgramFiles", "Antigravity IDE"),
+])
+def test_antigravity_detects_installation_without_profile(tmp_path, monkeypatch, root, variant):
+    for name in ("LOCALAPPDATA", "APPDATA", "USERPROFILE", "ProgramFiles", "ProgramFiles(x86)"):
+        monkeypatch.setenv(name, str(tmp_path / name))
+    target = next(t for t in known_targets() if t.id == "antigravity")
+    assert not target.is_installed()
+    install_root = tmp_path / root
+    if root == "LOCALAPPDATA":
+        install_root /= "Programs"
+    write(install_root / variant / f"{variant}.exe", "")
+    assert target.is_installed()
+    assert target.matches_exe(r"C:\Apps\Antigravity IDE\resources\language_server.exe")
+    assert not target.matches_exe(r"C:\Apps\Another Editor\resources\language_server.exe")
+
+
+def test_antigravity_restores_profiles_and_leaves_other_gemini_data(home, tmp_path, monkeypatch):
+    local, roaming, user = (tmp_path / name for name in ("local", "roaming", "user"))
+    target = next(t for t in targets_mod._ai(local, roaming, user) if t.id == "antigravity")
+    monkeypatch.setattr(processes, "close", lambda targets: None)
+    monkeypatch.setattr(processes, "launched_from", lambda targets: None)
+    profile = roaming / "Antigravity" / "Preferences"
+    assistant_state = user / ".gemini" / "antigravity" / "antigravity_state.pbtxt"
+    external = user / ".gemini" / "config" / "settings.json"
+    write(profile, "before")
+    write(assistant_state, "before")
+    session = Session(home, [target])
+    session.start([target])
+    write(profile, "during")
+    write(assistant_state, "during")
+    write(roaming / "Antigravity IDE" / "Preferences", "installed during session")
+    write(external, "untouched")
+    session.end()
+    assert read(profile) == read(assistant_state) == "before"
+    assert not (roaming / "Antigravity IDE").exists()
+    assert read(external) == "untouched"
+
+
+@pytest.mark.parametrize("legacy", ('"chatgpt"', '"codex"', '"chatgpt", "codex"'))
+def test_disabled_openai_cards_migrate_to_combined_card(tmp_path, legacy):
+    path = tmp_path / "settings.json"
+    write(path, '{"disabled_targets": ["happ", ' + legacy + ']}')
+    settings = Settings.load(path)
+    assert settings.disabled_targets == ["happ", "chatgpt_codex"]
+    settings.save(path)
+    assert Settings.load(path) == settings
 
 
 def test_claude_app_and_claude_code_close_their_own_processes():

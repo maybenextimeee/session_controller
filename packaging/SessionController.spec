@@ -48,6 +48,8 @@ def version_info():
 a = Analysis(
     [str(ROOT / "packaging" / "entry.py")],
     pathex=[str(ROOT)],
+    datas=[(str(ROOT / "session_controller" / "app_icons" / "*.png"),
+            "session_controller/app_icons")],
     excludes=["tkinter"],
 )
 pyz = PYZ(a.pure)
