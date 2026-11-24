@@ -7,6 +7,7 @@
 # рядом. Режим «папка», а не «один файл»: так программа быстрее запускается и
 # реже вызывает ложные срабатывания антивирусов.
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -44,6 +45,12 @@ def version_info():
         ],
     )
 
+
+# Qt for Windows imports the Windows ICU API. Search System32 before unrelated
+# tools on PATH (e.g. Poppler bundles an incompatible library of the same name).
+if sys.platform == "win32":
+    system32 = Path(os.environ["SystemRoot"]) / "System32"
+    os.environ["PATH"] = str(system32) + os.pathsep + os.environ.get("PATH", "")
 
 a = Analysis(
     [str(ROOT / "packaging" / "entry.py")],

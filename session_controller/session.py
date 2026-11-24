@@ -17,6 +17,8 @@
 как именно устроена очистка.
 """
 
+from session_controller.i18n import tr
+
 import json
 import logging
 import os
@@ -102,7 +104,7 @@ class Session:
     def start(self, targets: list[Target], progress: Progress | None = None) -> None:
         """Начать сессию для выбранных программ. Открытые программы будут закрыты."""
         if self.is_active:
-            raise SessionError("Сессия уже идёт")
+            raise SessionError(tr('Сессия уже идёт'))
         _refuse_if_launched_from(targets)
 
         processes.close(targets)
@@ -117,7 +119,7 @@ class Session:
         except OSError as error:
             log.exception("Не удалось сделать снимок")
             snapshot.delete_tree(self.backup_root)
-            raise SessionError(f"Не удалось сохранить состояние: {error}") from error
+            raise SessionError(tr('Не удалось сохранить состояние: {0}').format(error)) from error
 
         self.started_at = datetime.now()
         self._boot_time = psutil.boot_time()
@@ -128,7 +130,7 @@ class Session:
     def end(self, progress: Progress | None = None) -> None:
         """Завершить сессию: вернуть всё к состоянию до её начала."""
         if not self.is_active:
-            raise SessionError("Сессия не запущена")
+            raise SessionError(tr('Сессия не запущена'))
 
         targets = self.session_targets()
         _refuse_if_launched_from(targets)
@@ -146,7 +148,7 @@ class Session:
 
         if failed:
             # Журнал и снимок оставляем: завершение можно будет просто повторить.
-            raise SessionError("Не удалось очистить: " + ", ".join(failed))
+            raise SessionError(tr('Не удалось очистить: ') + ", ".join(failed))
 
         snapshot.delete_tree(self.backup_root)
         self.journal_path.unlink(missing_ok=True)
@@ -299,10 +301,7 @@ def _refuse_if_launched_from(targets: list[Target]) -> None:
     parent = processes.launched_from(targets)
     if parent:
         raise SessionError(
-            f"Session Controller запущен изнутри {parent.name} (например, из его терминала), "
-            f"поэтому не может закрыть {parent.name}.\n\n"
-            f"Запусти Session Controller отдельно (файлом start.bat) "
-            f"или сними галочку «{parent.name}» в списке «Что очищать»."
+            tr('Session Controller запущен изнутри {0} (например, из его терминала), поэтому не может закрыть {1}.\n\nЗапусти Session Controller отдельно (файлом start.bat) или сними галочку «{2}» в списке «Что очищать».').format(tr(parent.name), tr(parent.name), tr(parent.name))
         )
 
 

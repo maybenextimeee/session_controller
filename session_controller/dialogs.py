@@ -5,6 +5,8 @@
 заголовок, пояснение, при необходимости — список программ, и кнопки.
 """
 
+from session_controller.i18n import tr
+
 from dataclasses import dataclass
 
 from PySide6.QtCore import QRectF, Qt
@@ -212,7 +214,7 @@ def confirm(
     """Спросить «да или нет». True — нажали кнопку подтверждения."""
     dialog = Dialog(
         parent, heading, text,
-        [Button("cancel", "Отмена"), Button("ok", confirm_text, PRIMARY)],
+        [Button("cancel", tr('Отмена')), Button("ok", confirm_text, PRIMARY)],
         glyph, tone, items, items_title, more_items, more_items_title,
     )
     dialog.exec()
@@ -227,4 +229,4 @@ def inform(
     tone: str = ACCENT,
 ) -> None:
     """Показать сообщение с одной кнопкой «Понятно»."""
-    Dialog(parent, heading, text, [Button("ok", "Понятно", PRIMARY)], glyph, tone).exec()
+    Dialog(parent, heading, text, [Button("ok", tr('Понятно'), PRIMARY)], glyph, tone).exec()

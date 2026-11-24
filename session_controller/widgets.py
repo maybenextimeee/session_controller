@@ -2,6 +2,8 @@
 карточки, главная кнопка сессии, нажимаемый значок, плавная прокрутка,
 вкладки-переключатель, слой поверх окна, фон окна."""
 
+from session_controller.i18n import tr
+
 from PySide6.QtCore import (
     Property,
     QEasingCurve,
@@ -21,6 +23,7 @@ from PySide6.QtGui import (
     QIcon,
     QLinearGradient,
     QPainter,
+    QPainterPath,
     QPen,
     QPixmap,
     QRadialGradient,
@@ -33,6 +36,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QToolButton,
     QScrollArea,
     QSizePolicy,
     QVBoxLayout,
@@ -43,42 +47,9 @@ from session_controller import theme
 
 
 class Background(QWidget):
-    """Фон окна: точечная сетка, тающая книзу, и мягкое мятное свечение."""
-
-    DOT_STEP = 18
-
     def paintEvent(self, _event) -> None:
-        t = theme.current()
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(self.rect())
-        painter.fillRect(rect, theme.qcolor(t.bg))
-
-        size = max(rect.width(), rect.height())
-        for center, radius, color in (
-            (QPointF(rect.width() * 0.92, rect.height() * 0.02), size * 0.62, t.glow_1),
-            (QPointF(rect.width() * 0.02, rect.height() * 1.0), size * 0.55, t.glow_2),
-        ):
-            glow = QRadialGradient(center, radius)
-            glow.setColorAt(0, theme.qcolor(color))
-            glow.setColorAt(1, QColor(0, 0, 0, 0))
-            painter.fillRect(rect, glow)
-
-        # Точки видны сверху и постепенно исчезают к середине окна.
-        dot = theme.qcolor(t.dots)
-        base_alpha = dot.alphaF()
-        fade_to = rect.height() * 0.6
-        painter.setPen(Qt.PenStyle.NoPen)
-        step = self.DOT_STEP
-        y = step / 2
-        while y < fade_to:
-            dot.setAlphaF(base_alpha * (1 - y / fade_to))
-            painter.setBrush(dot)
-            x = step / 2
-            while x < rect.width():
-                painter.drawEllipse(QPointF(x, y), 1.0, 1.0)
-                x += step
-            y += step
+        painter.fillRect(self.rect(), theme.qcolor(theme.current().bg))
 
 
 class Switch(QAbstractButton):
@@ -232,7 +203,7 @@ class TargetCard(_ClickableCard):
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.installed = installed
-        self.setToolTip(hint if installed else self.NOT_INSTALLED_HINT)
+        self.setToolTip(hint if installed else tr(self.NOT_INSTALLED_HINT))
 
         self.icon_label = QLabel()
         self.icon_label.setFixedSize(self.ICON_SIZE, self.ICON_SIZE)
@@ -251,43 +222,131 @@ class TargetCard(_ClickableCard):
         else:
             self.switch.setParent(self)
             self.switch.hide()
-            tag = QLabel("нет на ПК")
+            tag = QLabel(tr('нет на ПК'))
             tag.setObjectName("tag")
             layout.addWidget(tag)
             self.setEnabled(False)
 
 
+class RevealRow(QWidget):
+    """Раскрывает место в списке, сохраняя размер содержимого."""
+
+    def __init__(self, content, parent):
+        super().__init__(parent)
+        self.content = content
+        content.setParent(self)
+        self.progress = 0.0
+        self.motion = QVariantAnimation(self)
+        self.motion.setStartValue(0.0)
+        self.motion.setEndValue(1.0)
+        self.motion.setDuration(280)
+        self.motion.setEasingCurve(QEasingCurve.Type.InOutSine)
+        self.motion.valueChanged.connect(self._frame)
+        self.motion.finished.connect(self._settle)
+        self.set_expanded(False, animate=False)
+
+    def set_expanded(self, expanded, *, animate=True):
+        if expanded:
+            self.show()
+        direction = (QVariantAnimation.Direction.Forward if expanded
+                     else QVariantAnimation.Direction.Backward)
+        self.motion.setDirection(direction)
+        if not animate:
+            self.motion.stop()
+            self.motion.setCurrentTime(self.motion.duration() if expanded else 0)
+            self._frame(float(expanded))
+            self._settle()
+        elif self.motion.state() == QVariantAnimation.State.Stopped and self.progress != float(expanded):
+            self.motion.start()
+
+    def _frame(self, progress):
+        self.progress = progress
+        height = self.content.sizeHint().height()
+        self.setFixedHeight(round((height + 6) * progress))
+        self._place_content(height)
+
+    def _place_content(self, height):
+        self.content.setGeometry(0, round(-6 * (1 - self.progress)), self.width(), height)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._place_content(self.content.sizeHint().height())
+
+    def _settle(self):
+        self.setVisible(self.progress > 0)
+
+
+class PinButton(QToolButton):
+    """Нарисованная векторная булавка с коротким поворотом при закреплении."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.motion = QVariantAnimation(self)
+        self.motion.setDuration(220)
+        self.motion.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.position = 0.0
+        self.motion.valueChanged.connect(self._frame)
+        self.toggled.connect(self._toggle)
+
+    def _frame(self, value):
+        self.position = value
+        self.update()
+
+    def _toggle(self, checked):
+        self.motion.stop()
+        end = float(checked)
+        if not self.isVisible():
+            self._frame(end)
+            return
+        self.motion.setStartValue(self.position)
+        self.motion.setEndValue(end)
+        self.motion.start()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.translate(self.width() / 2, self.height() / 2)
+        p.rotate(28 + 12 * self.position)
+        t = theme.current()
+        ink = QColor.fromRgbF(*(
+            a + (b - a) * self.position for a, b in
+            zip(theme.qcolor(t.muted).getRgbF(), theme.qcolor(t.text).getRgbF())
+        ))
+        pen = QPen(ink, 1.5)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        fill = QColor(ink)
+        fill.setAlphaF(self.position)
+        p.setBrush(fill)
+        head = QPainterPath()
+        head.moveTo(-4, -7)
+        for x, y in ((4, -7), (3, -5), (3, -1), (5, 2), (-5, 2), (-3, -1), (-3, -5)):
+            head.lineTo(x, y)
+        head.closeSubpath()
+        p.drawPath(head)
+        p.drawLine(QPointF(0, 2), QPointF(0, 8))
+
+
 class SettingRow(_ClickableCard):
     """Настройка: заголовок, пояснение мелким шрифтом и переключатель."""
 
-    def __init__(self, title: str, description: str, parent: QWidget | None = None) -> None:
+    def __init__(self, title: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
 
         title_label = QLabel(title)
         title_label.setObjectName("cardTitle")
         title_label.setWordWrap(True)
-        self.description_label = QLabel(description)
-        self.description_label.setObjectName("small")
-        self.description_label.setWordWrap(True)
-
-        texts = QVBoxLayout()
-        texts.setSpacing(3)
-        texts.addWidget(title_label)
-        texts.addWidget(self.description_label)
-
         layout = QHBoxLayout(self)
         layout.setContentsMargins(16, 13, 16, 13)
         layout.setSpacing(14)
-        layout.addLayout(texts, 1)
+        layout.addWidget(title_label, 1)
         layout.addWidget(self.switch, 0, Qt.AlignmentFlag.AlignVCenter)
 
 
 class SessionButton(QAbstractButton):
-    """Главная кнопка внизу окна: начать или завершить сессию.
-
-    Всё о сессии написано прямо на ней: вторая строка — сколько идёт сессия,
-    пульсирующая точка — сессия идёт или программа занята.
-    """
+    """Главная кнопка с прогрессом операции и временем начала активной сессии."""
 
     START = "start"
     STOP = "stop"
@@ -302,92 +361,58 @@ class SessionButton(QAbstractButton):
         self._mode = self.START
         self._subtitle = ""
 
-        self._phase = 0.0
-        self._pulse = QVariantAnimation(self)
-        self._pulse.setStartValue(0.0)
-        self._pulse.setEndValue(1.0)
-        self._pulse.setDuration(1800)
-        self._pulse.setLoopCount(-1)
-        self._pulse.valueChanged.connect(self._on_phase)
-
-        # Нажатие: кнопка чуть «вдавливается» и мягко возвращается.
-        self._press = 0.0
-        self._press_animation = QVariantAnimation(self)
-        self._press_animation.valueChanged.connect(self._on_press)
-        self.pressed.connect(lambda: self._animate_press(1.0, 90))
-        self.released.connect(lambda: self._animate_press(0.0, 260))
+        self._color_change = QVariantAnimation(self)
+        self._color_change.setDuration(120)
+        self._color_change.valueChanged.connect(lambda _: self.update())
 
     def sizeHint(self) -> QSize:
         return QSize(240, self.HEIGHT)
 
+    def _fill_color(self) -> QColor:
+        if self._color_change.state() == QVariantAnimation.State.Running:
+            return self._color_change.currentValue()
+        t = theme.current()
+        if self._mode == self.START and self.isEnabled():
+            return theme.qcolor(t.inverse_hover if self.underMouse() else t.inverse_bg)
+        return theme.qcolor(t.bg if self._mode == self.STOP else t.surface_2)
+
     def set_state(self, mode: str, title: str, subtitle: str = "") -> None:
-        self._mode = mode
+        if mode != self._mode:
+            previous = self._mode
+            fill = self._fill_color()
+            self._color_change.stop()
+            self._mode = mode
+            if self.isVisible() and self.BUSY in (previous, mode):
+                self._color_change.setStartValue(fill)
+                self._color_change.setEndValue(self._fill_color())
+                self._color_change.start()
         self._subtitle = subtitle
         self.setText(title)
-        if mode in (self.STOP, self.BUSY):
-            if self._pulse.state() == QVariantAnimation.State.Stopped:
-                self._pulse.start()
-        else:
-            self._pulse.stop()
-            self._phase = 0.0
         self.update()
-
-    def _on_phase(self, value: float) -> None:
-        self._phase = value
-        self.update()
-
-    def _on_press(self, value: float) -> None:
-        self._press = value
-        self.update()
-
-    def _animate_press(self, end: float, duration: int) -> None:
-        self._press_animation.stop()
-        self._press_animation.setStartValue(self._press)
-        self._press_animation.setEndValue(end)
-        self._press_animation.setDuration(duration)
-        self._press_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self._press_animation.start()
-
-    # Пока окно спрятано в трей, анимация не нужна — не тратим на неё процессор.
-    def hideEvent(self, event) -> None:
-        if self._pulse.state() == QVariantAnimation.State.Running:
-            self._pulse.pause()
-        super().hideEvent(event)
-
-    def showEvent(self, event) -> None:
-        if self._pulse.state() == QVariantAnimation.State.Paused:
-            self._pulse.resume()
-        super().showEvent(event)
 
     def paintEvent(self, _event) -> None:
         t = theme.current()
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        scale = 1 - 0.025 * self._press
-        center = QPointF(self.width() / 2, self.height() / 2)
-        painter.translate(center)
-        painter.scale(scale, scale)
-        painter.translate(-center)
-
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        hovered = self.underMouse() and self.isEnabled()
-        if self._mode == self.START and self.isEnabled():
-            gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
-            gradient.setColorAt(0, QColor("#5af0b8" if hovered else theme.MINT))
-            gradient.setColorAt(1, QColor("#d2f77a" if hovered else theme.LIME))
+        fill = self._fill_color()
+        painter.setBrush(fill)
+        if self._mode == self.STOP:
+            rect.adjust(1, 1, -1, -1)
+            if not t.dark:
+                painter.setPen(QPen(theme.qcolor(t.muted), 3))
+                painter.drawRoundedRect(rect, 8, 8)
+            painter.setPen(QPen(QColor("white"), 2))
+            title_color = theme.qcolor(t.text)
+        elif self._mode == self.START and self.isEnabled():
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(gradient)
-            title_color = QColor(theme.ON_ACCENT)
-        elif self._mode == self.STOP:
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(theme.qcolor(t.inverse_hover if hovered else t.inverse_bg))
             title_color = theme.qcolor(t.inverse_text)
         else:
             painter.setPen(QPen(theme.qcolor(t.border_strong), 1))
-            painter.setBrush(theme.qcolor(t.surface_2))
             title_color = theme.qcolor(t.muted if self._mode == self.BUSY else t.dim)
-        painter.drawRoundedRect(rect, 14, 14)
+        painter.drawRoundedRect(rect, 8, 8)
+        if self._color_change.state() == QVariantAnimation.State.Running:
+            title_color = QColor("black" if fill.lightness() >= 118 else "white")
 
         title_font = QFont(theme.fonts().display)
         title_font.setPixelSize(17)
@@ -397,31 +422,12 @@ class SessionButton(QAbstractButton):
         title_metrics = QFontMetricsF(title_font)
         sub_metrics = QFontMetricsF(sub_font)
 
-        dot = self._mode in (self.STOP, self.BUSY)
-        dot_space = 18 if dot else 0
         title_width = title_metrics.horizontalAdvance(self.text())
         block_height = title_metrics.height()
         if self._subtitle:
             block_height += 1 + sub_metrics.height()
         top = (self.height() - block_height) / 2
-        left = (self.width() - title_width - dot_space) / 2 + dot_space
-
-        if dot:
-            if self._mode == self.BUSY:
-                dot_color = theme.qcolor(t.busy)
-            else:
-                # На светлой кнопке мятная точка теряется — берём тёмно-зелёную.
-                dot_color = QColor("#0f9d68") if t.dark else QColor(theme.MINT)
-            dot_center = QPointF(left - 12, top + title_metrics.height() / 2)
-            halo = QColor(dot_color)
-            halo.setAlphaF(0.45 * (1 - self._phase))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(halo)
-            radius = 3.5 + 4.5 * self._phase
-            painter.drawEllipse(dot_center, radius, radius)
-            painter.setBrush(dot_color)
-            painter.drawEllipse(dot_center, 3.5, 3.5)
-
+        left = (self.width() - title_width) / 2
         painter.setFont(title_font)
         painter.setPen(title_color)
         painter.drawText(QPointF(left, top + title_metrics.ascent()), self.text())
@@ -714,6 +720,6 @@ class CenteredColumn(QWidget):
         free_width = self.width() - left - right
         free_height = self.height() - top - bottom
         width = min(free_width, self.max_width)
-        height = min(free_height, self.child.sizeHint().height())
+        height = free_height
         self.child.setGeometry(left + (free_width - width) // 2, top + (free_height - height) // 2,
                                width, height)

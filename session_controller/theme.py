@@ -1,10 +1,4 @@
-"""Светлая и тёмная тема интерфейса.
-
-Идея оформления — «чистый лист»: графитовый (или светлый, как бумага) фон
-с лёгким зелёным оттенком и мятно-лаймовый акцент — цвет чистоты и свежести.
-Шрифты встроены в Windows 10/11: Bahnschrift для заголовков, подписей и
-таймера, Segoe UI для текста.
-"""
+"""Монохромные темы интерфейса."""
 
 import logging
 from dataclasses import dataclass
@@ -21,9 +15,9 @@ DARK = "dark"
 CHOICES = {SYSTEM: "Как в системе", LIGHT: "Светлая", DARK: "Тёмная"}
 
 # Фирменный градиент: мята → лайм. Одинаковый в обеих темах.
-MINT = "#3ee6a8"
-LIME = "#c4f25c"
-ON_ACCENT = "#05140e"  # текст на градиенте
+MINT = "#ededed"
+LIME = "#ededed"
+ON_ACCENT = "#101010"  # текст на градиенте
 
 
 @dataclass(frozen=True)
@@ -54,52 +48,52 @@ class Theme:
 
 DARK_THEME = Theme(
     dark=True,
-    bg="#0b0f0e",
-    surface="#121816",
-    surface_hover="#171f1c",
-    surface_2="#1b2421",
+    bg="#0e0e0e",
+    surface="#171717",
+    surface_hover="#1d1d1d",
+    surface_2="#222222",
     border="rgba(255, 255, 255, 0.06)",
     border_strong="rgba(255, 255, 255, 0.12)",
-    text="#e9f1ed",
-    muted="#93a39c",
-    dim="#5f6e68",
+    text="#efefef",
+    muted="#9f9f9f",
+    dim="#6a6a6a",
     accent=MINT,
-    busy="#f5b94a",
-    danger="#ff7b6b",
-    inverse_bg="#e9f1ed",
-    inverse_text="#0b0f0e",
+    busy="#bebebe",
+    danger="#969696",
+    inverse_bg="#efefef",
+    inverse_text="#0e0e0e",
     inverse_hover="#ffffff",
-    selected_bg="rgba(62, 230, 168, 0.07)",
-    selected_border="rgba(62, 230, 168, 0.32)",
-    glow_1="rgba(62, 230, 168, 0.11)",
-    glow_2="rgba(196, 242, 92, 0.05)",
+    selected_bg="rgba(153, 153, 153, 0.07)",
+    selected_border="rgba(153, 153, 153, 0.32)",
+    glow_1="rgba(153, 153, 153, 0.11)",
+    glow_2="rgba(177, 177, 177, 0.05)",
     dots="rgba(255, 255, 255, 0.07)",
-    scrim="rgba(4, 7, 6, 0.74)",
+    scrim="rgba(6, 6, 6, 0.74)",
 )
 
 LIGHT_THEME = Theme(
     dark=False,
-    bg="#f1f4f0",
+    bg="#f3f3f3",
     surface="#ffffff",
-    surface_hover="#f7faf7",
-    surface_2="#e7ede8",
-    border="rgba(14, 30, 22, 0.08)",
-    border_strong="rgba(14, 30, 22, 0.16)",
-    text="#0e1612",
-    muted="#55645d",
-    dim="#8b9891",
-    accent="#0c9b69",
-    busy="#c98a12",
-    danger="#d64b3c",
-    inverse_bg="#0e1612",
-    inverse_text="#f1f4f0",
-    inverse_hover="#26302b",
-    selected_bg="rgba(12, 155, 105, 0.05)",
-    selected_border="rgba(12, 155, 105, 0.35)",
-    glow_1="rgba(62, 230, 168, 0.28)",
-    glow_2="rgba(196, 242, 92, 0.22)",
-    dots="rgba(14, 30, 22, 0.09)",
-    scrim="rgba(14, 22, 18, 0.34)",
+    surface_hover="#f9f9f9",
+    surface_2="#ebebeb",
+    border="rgba(22, 22, 22, 0.08)",
+    border_strong="rgba(22, 22, 22, 0.16)",
+    text="#141414",
+    muted="#606060",
+    dim="#959595",
+    accent="#797979",
+    busy="#8f8f8f",
+    danger="#676767",
+    inverse_bg="#141414",
+    inverse_text="#f3f3f3",
+    inverse_hover="#2e2e2e",
+    selected_bg="rgba(91, 91, 91, 0.05)",
+    selected_border="rgba(91, 91, 91, 0.35)",
+    glow_1="rgba(153, 153, 153, 0.28)",
+    glow_2="rgba(177, 177, 177, 0.22)",
+    dots="rgba(22, 22, 22, 0.09)",
+    scrim="rgba(18, 18, 18, 0.34)",
 )
 
 
@@ -238,14 +232,17 @@ QMainWindow, QDialog, QMessageBox {{
 }}
 QLabel:disabled {{ color: {t.dim}; }}
 
+QLabel#homeHeading {{ font-size: 26pt; font-weight: 650; color: {t.text}; }}
+QToolButton#pin {{ background: {t.surface}; color: {t.muted}; border: 1px solid {t.border}; border-radius: 6px; min-width: 35px; min-height: 39px; font-size: 12pt; }}
+QToolButton#pin:checked, QToolButton#pin:hover {{ color: {t.text}; border-color: {t.border_strong}; }}
 QLabel#appTitle {{
     font-family: "{f.display}";
-    font-size: 15pt;
+    font-size: 13pt;
     font-weight: 600;
 }}
 QLabel#pageTitle {{
     font-family: "{f.display}";
-    font-size: 14pt;
+    font-size: 22pt;
     font-weight: 600;
 }}
 QLabel#caps {{
@@ -271,12 +268,12 @@ QLabel#cardTitle {{ font-weight: 600; }}
 QFrame#panel {{
     background: {t.surface};
     border: 1px solid {t.border};
-    border-radius: 16px;
+    border-radius: 8px;
 }}
 QFrame#card {{
     background: {t.surface};
     border: 1px solid {t.border};
-    border-radius: 11px;
+    border-radius: 6px;
 }}
 QFrame#card:hover {{
     background: {t.surface_hover};
@@ -294,7 +291,7 @@ QFrame#card QLabel:disabled {{ color: {t.muted}; }}
 QFrame#segmented {{
     background: {t.surface_2};
     border: none;
-    border-radius: 11px;
+    border-radius: 6px;
 }}
 
 QPushButton {{
@@ -348,7 +345,7 @@ QPushButton#dialogPrimary {{
     background: {gradient};
 }}
 QPushButton#dialogPrimary:hover {{
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #5af0b8, stop:1 #d2f77a);
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #cccccc, stop:1 #e6e6e6);
 }}
 QPushButton#dialogSecondary {{
     background: {t.surface};
@@ -370,12 +367,12 @@ QLabel#tag {{
     padding: 2px 7px;
 }}
 QPushButton#moreButton {{
-    background: transparent;
-    border: none;
+    background: {t.surface};
+    border: 1px solid {t.border_strong};
     border-radius: 8px;
     padding: 8px 12px;
     min-width: 0;
-    color: {t.dim};
+    color: {t.text};
 }}
 QPushButton#moreButton:hover {{
     color: {t.text};
