@@ -128,3 +128,49 @@ def test_session_button_paints_start_transition(monkeypatch, palette):
         assert colors() == [palette.bg, palette.bg]
     finally:
         button.close()
+
+
+def test_drag_pin_persists_order_without_unpinning(tmp_path, monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(ui, "INSTANCE_SERVER", str(uuid4()))
+    targets = [Target(key, key.upper(), paths=(tmp_path,)) for key in ("a", "b", "c")]
+    settings = Settings(pinned_targets=["a", "b", "c"])
+    settings_path = tmp_path / "settings.json"
+    window = ui.MainWindow(Session(tmp_path / "state", targets), settings, settings_path,
+                           theme.ThemeManager(app, "dark"))
+    window.show()
+    try:
+        QTest.qWait(40)
+        handle = window.pin_buttons["a"][0]
+        start = handle.rect().center()
+        last = window.home_rows["c"]
+        end = handle.mapFromGlobal(last.mapToGlobal(last.rect().bottomRight()))
+        QTest.mousePress(handle, Qt.MouseButton.LeftButton, pos=start)
+        layer = window.pin_drag_layer
+        assert handle.cursor().shape() == Qt.CursorShape.ArrowCursor
+        assert layer is not None
+        layer.motion.setCurrentTime(75)
+        assert .96 < layer.scale() < 1.
+        QTest.mouseMove(handle, end)
+        assert layer.start["b"] != layer.dest["b"]
+        QTest.mouseRelease(handle, Qt.MouseButton.LeftButton, pos=start)
+        assert handle.isChecked()
+        assert settings.pinned_targets == ["b", "c", "a"]
+        assert Settings.load(settings_path).pinned_targets == ["b", "c", "a"]
+        QTest.mouseClick(handle, Qt.MouseButton.LeftButton)
+        assert settings.pinned_targets == ["b", "c"]
+        QTest.qWait(310)
+        card = window.target_cards["b"]
+        destination = window.home_rows["c"]
+        end = card.mapFromGlobal(destination.mapToGlobal(destination.rect().bottomRight()))
+        QTest.mousePress(card, Qt.MouseButton.LeftButton, pos=card.rect().center())
+        QTest.mouseMove(card, end)
+        QTest.mouseRelease(card, Qt.MouseButton.LeftButton)
+        assert settings.pinned_targets == ["c", "b"]
+    finally:
+        window.instance_server.close()
+        window.tray.hide()
+        window.hide()
+        window.deleteLater()
+        app.processEvents()

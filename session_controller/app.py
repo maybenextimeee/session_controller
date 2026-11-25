@@ -57,6 +57,7 @@ from session_controller.widgets import (
     SmoothScrollArea,
     TargetCard,
     PinButton,
+    PinDragLayer,
 )
 from session_controller.winapi import (
     block_shutdown,
@@ -271,6 +272,7 @@ class MainWindow(QMainWindow):
         self.main_content = QWidget()
         self.home_rows = {}
         self.pin_buttons = {}
+        self.pin_drag_layer = None
         self.pin_list = QVBoxLayout()
         self.pin_list.setSpacing(0)
         for t in self.session.targets:
@@ -280,7 +282,7 @@ class MainWindow(QMainWindow):
                 card.switch.setChecked(t.id not in self.settings.disabled_targets)
                 card.switch.toggled.connect(self.on_targets_changed)
                 self.target_cards[t.id] = card
-            self.home_rows[t.id] = RevealRow(self._pin_row(t, card), self.main_content)
+            self.home_rows[t.id] = RevealRow(self._pin_row(t, card, reorderable=True), self.main_content)
         empty_label = QLabel(tr("Закрепите программы из каталога."))
         empty_label.setObjectName("small")
         self.empty_pins = RevealRow(empty_label, self.main_content)
@@ -319,13 +321,19 @@ class MainWindow(QMainWindow):
         page_layout.addWidget(self.session_button)
         return page
 
-    def _pin_row(self, target, card):
+    def _pin_row(self, target, card, *, reorderable=False):
         row = QWidget(self.main_content)
         layout = QHBoxLayout(row)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
         layout.addWidget(card, 1)
-        pin = PinButton()
+        pin = PinButton(reorderable=reorderable)
+        if reorderable:
+            pin.enable_drag(card)
+            pin.lifted.connect(lambda point: self._lift_pin(target.id, point.toPoint()))
+            pin.tapped.connect(self._cancel_pin_lift)
+            pin.dragged.connect(lambda point: self._move_pin(target.id, point.toPoint()))
+            pin.dropped.connect(self._drop_pin)
         pin.setObjectName("pin")
         pin.setCheckable(True)
         pin.setChecked(target.id in self.settings.pinned_targets)
@@ -338,7 +346,60 @@ class MainWindow(QMainWindow):
     def _label_pin(self, pin, target):
         action = tr("Открепить") if pin.isChecked() else tr("Закрепить")
         pin.setToolTip(f"{action} · {tr(target.name)}")
+        if pin.reorderable:
+            pin.setToolTip(pin.toolTip() + "\n" + tr("Потяни, чтобы изменить порядок"))
         pin.setAccessibleName(pin.toolTip())
+
+    def _lift_pin(self, key, point):
+        self._cancel_pin_lift()
+        rows = {k: self.home_rows[k] for k in self.settings.pinned_targets if k in self.home_rows}
+        if key in rows:
+            self.pin_drag_layer = PinDragLayer(self.main_content, rows, key, point)
+
+    def _cancel_pin_lift(self):
+        if self.pin_drag_layer is not None:
+            self.pin_drag_layer.hide()
+            self.pin_drag_layer.deleteLater()
+            self.pin_drag_layer = None
+
+    def _drop_pin(self):
+        if self.pin_drag_layer is not None:
+            layer = self.pin_drag_layer
+            self.pin_drag_layer = None
+            layer.slide(settling=True)
+        self.settings.save(self.settings_path)
+
+    def _move_pin(self, key, global_pos):
+        pins = self.settings.pinned_targets
+        if key not in pins:
+            return
+        viewport = self.main_scroll.viewport()
+        y = viewport.mapFromGlobal(global_pos).y()
+        bar = self.main_scroll.verticalScrollBar()
+        if y < 24:
+            bar.setValue(bar.value() - 24)
+        elif y > viewport.height() - 24:
+            bar.setValue(bar.value() + 24)
+        if self.pin_drag_layer is not None:
+            self.pin_drag_layer.follow(global_pos)
+        others = [other for other in pins if other != key and other in self.home_rows]
+        index = sum(self.home_rows[other].mapFromGlobal(global_pos).y()
+                    > self.home_rows[other].rect().center().y() for other in others)
+        widget = self.home_rows[key]
+        visible_order = [pin for pin in pins if pin in self.home_rows]
+        if visible_order.index(key) == index:
+            return
+        pins.remove(key)
+        before = others[index] if index < len(others) else None
+        pins.insert(pins.index(before) if before else len(pins), key)
+        self.pin_list.removeWidget(widget)
+        if before:
+            self.pin_list.insertWidget(self.pin_list.indexOf(self.home_rows[before]), widget)
+        else:
+            self.pin_list.addWidget(widget)
+        self.pin_list.activate()
+        if self.pin_drag_layer is not None:
+            self.pin_drag_layer.slide()
 
     def _layout_pins(self):
         while self.pin_list.count():
@@ -402,7 +463,7 @@ class MainWindow(QMainWindow):
         header.addWidget(close_button, 0, Qt.AlignmentFlag.AlignTop)
 
         note = QLabel(
-            tr('Программы, которых нет на компьютере, тоже под защитой: если их установят и запустят во время сессии, при завершении их данные удалятся. Новая программа станет доступна после перезапуска Session Controller.')
+            tr('Новая программа станет доступна после перезапуска Session Controller.')
         )
         note.setObjectName("small")
         note.setWordWrap(True)
@@ -433,7 +494,7 @@ class MainWindow(QMainWindow):
                 content_layout.addWidget(self._pin_row(target, card))
         content_layout.addStretch(1)
 
-        scroll = SmoothScrollArea()
+        scroll = SmoothScrollArea(wheel_step=84, wheel_duration=390)
         scroll.setWidget(content)
 
         layout = QVBoxLayout(overlay.panel)
@@ -1087,7 +1148,7 @@ def _run(home: Path, minimized: bool, smoke_test: bool) -> int:
             )
         return 0
     create_app_mutex(APP_MUTEX)
-    if autostart.is_supported():
+    if not smoke_test and autostart.is_supported():
         autostart.refresh_path()
 
     session = Session(home, known_targets())

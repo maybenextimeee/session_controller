@@ -1,7 +1,7 @@
 # Автосборка на сервере GitHub с Windows.
 #
 # При каждом пуше: тесты → SessionController.exe → проверка запуска →
-# установщик и портативный архив. Их можно скачать на вкладке Actions,
+# установщик. Его можно скачать на вкладке Actions,
 # в разделе Artifacts нужного запуска.
 #
 # При пуше тега вида v0.4.0 дополнительно создаётся релиз на странице Releases:
@@ -103,18 +103,10 @@ jobs:
           }
           Write-Host "Install / run / uninstall OK"
 
-      - name: Portable zip
-        shell: pwsh
-        run: |
-          Compress-Archive -Path dist\SessionController `
-            -DestinationPath "dist\SessionController-${{ steps.version.outputs.version }}-portable.zip"
-
       - uses: actions/upload-artifact@v4
         with:
           name: SessionController-${{ steps.version.outputs.version }}
-          path: |
-            dist/SessionController-Setup-*.exe
-            dist/SessionController-*-portable.zip
+          path: dist/SessionController-Setup-*.exe
           if-no-files-found: error
 
       - name: Release
@@ -125,7 +117,7 @@ jobs:
           body_path: packaging/release-notes.md
           # Под текстом из body_path GitHub допишет список изменений.
           generate_release_notes: true
+          make_latest: "true"
           # В релиз кладём только установщик: его и нужно скачивать.
-          # Портативный архив остаётся в Artifacts на вкладке Actions.
           files: dist/SessionController-Setup-*.exe
           fail_on_unmatched_files: true
