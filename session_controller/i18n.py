@@ -22,7 +22,7 @@ _ENGLISH = {
     "Открыть страницу загрузки новой версии": "Download the new version",
     "Все программы": "App catalogue",
     "Закрыть": "Close",
-    "Программы, которых нет на компьютере, тоже под защитой: если их установят и запустят во время сессии, при завершении их данные удалятся. Новая программа станет доступна после перезапуска Session Controller.": "Apps installed during a session are also covered. Restart Session Controller to refresh the list of installed apps.",
+    "Новая программа станет доступна после перезапуска Session Controller.": "A new app will appear after you restart Session Controller.",
     "Назад": "Back",
     "Тема": "Theme",
     "При первом запуске — как в Windows": "Follow Windows or choose a theme.",

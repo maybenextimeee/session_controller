@@ -69,6 +69,8 @@ class Target:
     package_families: tuple[str, ...] = ()
 
     def is_installed(self) -> bool:
+        if self.id == ACCOUNT_TARGET.id:
+            return True
         if self.kind == CREDENTIALS:
             return sys.platform == "win32"
         return (any(path.exists() for path in (*self.paths, *self.install_paths))
@@ -82,6 +84,13 @@ class Target:
             return True
         exe_path = exe_path.lower()
         return any(hint in exe_path for hint in self.exe_hint.lower().split("|"))
+
+
+ACCOUNT_TARGET = Target(
+    "session_controller_account",
+    "Выходить из аккаунта Session Controller",
+    hint="Удаляет сохранённый вход на этом ПК при завершении сессии",
+)
 
 
 WINDOWS_CREDENTIALS = Target(

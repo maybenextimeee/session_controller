@@ -1,4 +1,4 @@
-﻿; Установщик Session Controller (Inno Setup 6: https://jrsoftware.org/isinfo.php).
+; Установщик Session Controller (Inno Setup 6: https://jrsoftware.org/isinfo.php).
 ;
 ; Сначала собери exe (packaging/SessionController.spec), потом из корня репозитория:
 ;     ISCC.exe /DAppVersion=0.4.0 packaging\installer.iss
@@ -9,6 +9,10 @@
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
+#endif
+
+#ifndef AppFiles
+  #define AppFiles "..\dist\SessionController"
 #endif
 
 #define AppName "Session Controller"
@@ -57,7 +61,7 @@ Name: "autostart"; Description: "{cm:AutoStart}"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "..\dist\SessionController\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#AppFiles}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [InstallDelete]
 ; При обновлении убираем файлы прошлой версии, чтобы не смешивались библиотеки.
@@ -78,7 +82,8 @@ Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags
 function InitializeUninstall(): Boolean;
 begin
   Result := True;
-  if FileExists(ExpandConstant('{localappdata}\SessionController\session.json')) then
+  if FileExists(ExpandConstant('{localappdata}\SessionController\session.json')) or
+     FileExists(ExpandConstant('{localappdata}\SessionControllerCollege\session.json')) then
     Result := MsgBox(CustomMessage('SessionActive'), mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
 end;
 

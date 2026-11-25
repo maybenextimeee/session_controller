@@ -162,6 +162,10 @@ class Dialog(QDialog):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(root)
+        self.ensurePolished()
+        self.adjustSize()
+        self.setFixedSize(self.size())
+        self.setSizeGripEnabled(False)
 
     def _choose(self, key: str) -> None:
         self.choice = key

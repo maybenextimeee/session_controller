@@ -17,6 +17,7 @@ class Settings:
     disabled_targets: list[str] = field(default_factory=list)
     # Тема окна: "system" (как в Windows), "light" или "dark".
     theme: str = "system"
+    account_server_url: str = ""
     # Раз в сутки спрашивать GitHub, нет ли новой версии.
     check_updates: bool = True
     # Удалять в конце сессии то, что появилось за неё в «Загрузках».
@@ -48,6 +49,7 @@ class Settings:
             data["disabled_targets"] = [
                 target for target in disabled if target not in ("chatgpt", "codex", "chatgpt_codex")
             ] + ["chatgpt_codex"]
+        data.setdefault("account_server_url", data.pop("demo_server_url", ""))
         known = {f.name for f in fields(cls)}
         return cls(**{key: value for key, value in data.items() if key in known})
 

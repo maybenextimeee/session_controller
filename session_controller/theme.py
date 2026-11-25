@@ -305,6 +305,33 @@ QPushButton:hover {{ background: {t.surface_hover}; border-color: {t.dim}; }}
 QPushButton:pressed {{ background: {t.surface_2}; }}
 QPushButton:disabled {{ color: {t.dim}; border-color: {t.border}; }}
 
+QLineEdit#accountInput, QListWidget#accountEntries {{
+    background: {t.surface_2};
+    color: {t.text};
+    border: 1px solid {t.border};
+    border-radius: 9px;
+    padding: 7px 10px;
+    selection-background-color: {t.accent};
+    selection-color: {t.bg};
+}}
+QLineEdit#accountInput:focus {{
+    border-color: {t.accent};
+}}
+QLabel#profileName {{ font-size: 24pt; font-weight: 700; color: {t.text}; }}
+QPushButton#accountLogout {{
+    color: {"#ff9595" if t.dark else "#a32730"};
+    background: {"#291b1c" if t.dark else "#fff3f3"};
+    border: 1px solid {"#573033" if t.dark else "#eac4c6"};
+}}
+QPushButton#accountLogout:hover {{
+    background: {"#402427" if t.dark else "#ffe1e3"};
+}}
+QListWidget#accountEntries {{ outline: 0; show-decoration-selected: 0; padding: 5px; }}
+
+QListWidget#accountEntries::item {{ min-height: 34px; padding: 0 10px; border: 0; border-radius: 6px; }}
+QListWidget#accountEntries::item:selected {{ background: {t.inverse_bg}; color: {t.inverse_text}; }}
+QListWidget#accountEntries::item:hover:!selected {{ background: {t.surface_hover}; }}
+
 
 QPushButton#segment {{
     background: transparent;

@@ -9,7 +9,7 @@ from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from PySide6.QtCore import QFileInfo, QLockFile, QObject, Qt, QThread, QTimer, QUrl, Signal, Slot, QPoint, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import QFileInfo, QLockFile, QObject, QSize, Qt, QThread, QTimer, QUrl, Signal, Slot, QPoint, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QIcon, QKeySequence, QShortcut
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
@@ -31,12 +31,15 @@ from PySide6.QtWidgets import (
 )
 
 from session_controller import __version__, autostart, dialogs, theme, updates
+from session_controller.account_storage import SavedAccount, server_address
+from session_controller.account_page import AccountPage, avatar_pixmap
 from session_controller.icons import make_icon, target_icon
 from session_controller.paths import app_home
 from session_controller.session import Session, SessionError
 from session_controller.settings import Settings
 from session_controller.targets import (
     AI,
+    ACCOUNT_TARGET,
     APP,
     BROWSER,
     CREDENTIALS,
@@ -56,7 +59,7 @@ from session_controller.widgets import (
     SettingRow,
     SmoothScrollArea,
     TargetCard,
-    PinButton,
+    PinButton, PinDragLayer,
 )
 from session_controller.winapi import (
     block_shutdown,
@@ -169,11 +172,18 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(480, 460)
 
         self.pages = QStackedWidget()
+        self.account = AccountPage(self, server_address(settings_path.parent, settings.account_server_url),
+                                   SavedAccount(settings_path.parent))
+        self.account_page = self._build_account_page()
+        self.account.avatar_changed.connect(self.update_account_icon)
         self.main_page = self._build_main_page()
         self.settings_page = self._build_settings_page()
         self.pages.addWidget(self.main_page)
         self.pages.addWidget(self.settings_page)
+        self.pages.addWidget(self.account_page)
         self._switch_page(self.main_page)
+        if self.account.token:
+            QTimer.singleShot(0, self.account.activate)
 
         background = Background()
         # Колонка не шире CONTENT_WIDTH и не выше, чем нужно содержимому;
@@ -238,6 +248,11 @@ class MainWindow(QMainWindow):
     def _build_main_page(self) -> QWidget:
         settings_button = _icon_button(GEAR_GLYPH, GEAR_FALLBACK, tr('Настройки'))
         settings_button.clicked.connect(self.show_settings)
+        self.account_button = _icon_button("", "", tr("Аккаунт"))
+        self.account_button.setAccessibleName(tr("Аккаунт"))
+        self.account_button.setIconSize(QSize(26, 26))
+        self.account_button.clicked.connect(self.show_account)
+        self.update_account_icon(self.account.profile_avatar)
 
         logo = PressableIcon(make_icon(), 40)
         title = QLabel(APP_NAME)
@@ -256,6 +271,7 @@ class MainWindow(QMainWindow):
         header.addWidget(logo)
         header.addWidget(title, 1)
         header.addWidget(self.update_button)
+        header.addWidget(self.account_button)
         header.addWidget(settings_button)
 
         # Что очищать.
@@ -271,6 +287,7 @@ class MainWindow(QMainWindow):
         self.main_content = QWidget()
         self.home_rows = {}
         self.pin_buttons = {}
+        self.pin_drag_layer = None
         self.pin_list = QVBoxLayout()
         self.pin_list.setSpacing(0)
         for t in self.session.targets:
@@ -280,7 +297,7 @@ class MainWindow(QMainWindow):
                 card.switch.setChecked(t.id not in self.settings.disabled_targets)
                 card.switch.toggled.connect(self.on_targets_changed)
                 self.target_cards[t.id] = card
-            self.home_rows[t.id] = RevealRow(self._pin_row(t, card), self.main_content)
+            self.home_rows[t.id] = RevealRow(self._pin_row(t, card, reorderable=True), self.main_content)
         empty_label = QLabel(tr("Закрепите программы из каталога."))
         empty_label.setObjectName("small")
         self.empty_pins = RevealRow(empty_label, self.main_content)
@@ -319,13 +336,19 @@ class MainWindow(QMainWindow):
         page_layout.addWidget(self.session_button)
         return page
 
-    def _pin_row(self, target, card):
+    def _pin_row(self, target, card, *, reorderable=False):
         row = QWidget(self.main_content)
         layout = QHBoxLayout(row)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
         layout.addWidget(card, 1)
-        pin = PinButton()
+        pin = PinButton(reorderable=reorderable)
+        if reorderable:
+            pin.enable_drag(card)
+            pin.lifted.connect(lambda point: self._lift_pin(target.id, point.toPoint()))
+            pin.tapped.connect(self._cancel_pin_lift)
+            pin.dragged.connect(lambda point: self._move_pin(target.id, point.toPoint()))
+            pin.dropped.connect(self._drop_pin)
         pin.setObjectName("pin")
         pin.setCheckable(True)
         pin.setChecked(target.id in self.settings.pinned_targets)
@@ -338,7 +361,60 @@ class MainWindow(QMainWindow):
     def _label_pin(self, pin, target):
         action = tr("Открепить") if pin.isChecked() else tr("Закрепить")
         pin.setToolTip(f"{action} · {tr(target.name)}")
+        if pin.reorderable:
+            pin.setToolTip(pin.toolTip() + "\nПотяни, чтобы изменить порядок")
         pin.setAccessibleName(pin.toolTip())
+
+    def _lift_pin(self, key, point):
+        self._cancel_pin_lift()
+        rows = {k: self.home_rows[k] for k in self.settings.pinned_targets if k in self.home_rows}
+        if key in rows:
+            self.pin_drag_layer = PinDragLayer(self.main_content, rows, key, point)
+
+    def _cancel_pin_lift(self):
+        if self.pin_drag_layer is not None:
+            self.pin_drag_layer.hide()
+            self.pin_drag_layer.deleteLater()
+            self.pin_drag_layer = None
+
+    def _drop_pin(self):
+        if self.pin_drag_layer is not None:
+            layer = self.pin_drag_layer
+            self.pin_drag_layer = None
+            layer.slide(settling=True)
+        self.settings.save(self.settings_path)
+
+    def _move_pin(self, key, global_pos):
+        pins = self.settings.pinned_targets
+        if key not in pins:
+            return
+        viewport = self.main_scroll.viewport()
+        y = viewport.mapFromGlobal(global_pos).y()
+        bar = self.main_scroll.verticalScrollBar()
+        if y < 24:
+            bar.setValue(bar.value() - 24)
+        elif y > viewport.height() - 24:
+            bar.setValue(bar.value() + 24)
+        if self.pin_drag_layer is not None:
+            self.pin_drag_layer.follow(global_pos)
+        others = [other for other in pins if other != key and other in self.home_rows]
+        index = sum(self.home_rows[other].mapFromGlobal(global_pos).y()
+                    > self.home_rows[other].rect().center().y() for other in others)
+        widget = self.home_rows[key]
+        visible_order = [pin for pin in pins if pin in self.home_rows]
+        if visible_order.index(key) == index:
+            return
+        pins.remove(key)
+        before = others[index] if index < len(others) else None
+        pins.insert(pins.index(before) if before else len(pins), key)
+        self.pin_list.removeWidget(widget)
+        if before:
+            self.pin_list.insertWidget(self.pin_list.indexOf(self.home_rows[before]), widget)
+        else:
+            self.pin_list.addWidget(widget)
+        self.pin_list.activate()
+        if self.pin_drag_layer is not None:
+            self.pin_drag_layer.slide()
 
     def _layout_pins(self):
         while self.pin_list.count():
@@ -378,7 +454,8 @@ class MainWindow(QMainWindow):
         self.setFixedSize(width, height)
 
     def _target_card(self, target: Target, installed: bool) -> TargetCard:
-        return TargetCard(target_icon(target), tr(target.name), tr(target.hint),
+        icon = make_icon() if target.id == ACCOUNT_TARGET.id else target_icon(target)
+        return TargetCard(icon, tr(target.name), tr(target.hint),
                           installed=installed)
 
     def _build_apps_overlay(self, parent: QWidget) -> Overlay:
@@ -402,7 +479,7 @@ class MainWindow(QMainWindow):
         header.addWidget(close_button, 0, Qt.AlignmentFlag.AlignTop)
 
         note = QLabel(
-            tr('Программы, которых нет на компьютере, тоже под защитой: если их установят и запустят во время сессии, при завершении их данные удалятся. Новая программа станет доступна после перезапуска Session Controller.')
+            tr('Новая программа станет доступна после перезапуска Session Controller.')
         )
         note.setObjectName("small")
         note.setWordWrap(True)
@@ -433,7 +510,7 @@ class MainWindow(QMainWindow):
                 content_layout.addWidget(self._pin_row(target, card))
         content_layout.addStretch(1)
 
-        scroll = SmoothScrollArea()
+        scroll = SmoothScrollArea(wheel_step=84, wheel_duration=390)
         scroll.setWidget(content)
 
         layout = QVBoxLayout(overlay.panel)
@@ -589,13 +666,36 @@ class MainWindow(QMainWindow):
         self._switch_page(self.settings_page)
         self.settings_page.setFocus()
 
+    def _build_account_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        header = QHBoxLayout()
+        back = _icon_button(BACK_GLYPH, BACK_FALLBACK, tr("Назад"))
+        back.clicked.connect(self.show_main)
+        title = QLabel(tr("Аккаунт"))
+        title.setObjectName("pageTitle")
+        header.addWidget(back)
+        header.addWidget(title, 1)
+        layout.addLayout(header)
+        layout.addSpacing(12)
+        layout.addWidget(self.account, 1)
+        return page
+
+    def show_account(self) -> None:
+        self._switch_page(self.account_page)
+        self.account.activate()
+
+    def update_account_icon(self, picture: str) -> None:
+        self.account_button.setIcon(QIcon(avatar_pixmap(picture, 26)))
+
     def show_main(self) -> None:
         self._switch_page(self.main_page)
 
     def _switch_page(self, page: QWidget) -> None:
         # Высоту колонки задаёт только видимая страница: иначе короткая главная
         # растягивалась бы до высоты настроек, и под списком была бы пустота.
-        for other in (self.main_page, self.settings_page):
+        for other in (self.main_page, self.settings_page, self.account_page):
             policy = (QSizePolicy.Policy.Preferred if other is page
                       else QSizePolicy.Policy.Ignored)
             other.setSizePolicy(policy, policy)
@@ -608,7 +708,7 @@ class MainWindow(QMainWindow):
         self.pages.updateGeometry()
         if self.isVisible() and previous is not page:
             motion = QPropertyAnimation(page, b"pos", self)
-            motion.setStartValue(QPoint(16 if page is self.settings_page else -12, 0))
+            motion.setStartValue(QPoint(-12 if page is self.main_page else 16, 0))
             motion.setEndValue(QPoint(0, 0))
             motion.setDuration(180)
             motion.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -619,7 +719,7 @@ class MainWindow(QMainWindow):
         """Esc закрывает то, что открыто поверх главной: панель или настройки."""
         if self.apps_overlay.isVisible():
             self.apps_overlay.close_overlay()
-        elif self.pages.currentWidget() is self.settings_page:
+        elif self.pages.currentWidget() is not self.main_page:
             self.show_main()
 
     # ---------- Сессия ----------
@@ -675,6 +775,8 @@ class MainWindow(QMainWindow):
 
     def end_session(self, confirm: bool = True,
                     on_done: Callable[[bool], None] | None = None) -> None:
+        if self._busy:
+            return
         if confirm:
             text = tr('Всё, что появилось за сессию, — входы в аккаунты, пароли, история — исчезнет.')
             running = self.session.running(self.session.session_targets())
@@ -698,7 +800,20 @@ class MainWindow(QMainWindow):
                     on_done(False)
                 return
 
+        if not self.sign_out_session_account():
+            if on_done is not None:
+                on_done(False)
+            return
         self.run_task(tr('Очищаю'), lambda progress: self.session.end(progress), on_done)
+
+    def sign_out_session_account(self) -> bool:
+        if all(target.id != ACCOUNT_TARGET.id for target in self.session.session_targets()):
+            return True
+        if self.account.sign_out():
+            return True
+        dialogs.inform(self, "Выход из Session Controller", self.account.status.text(),
+                       dialogs.ERROR, dialogs.DANGER)
+        return False
 
     def run_task(self, verb: str,
                  task: Callable[[Callable[[int, int, str], None]], None],
@@ -711,6 +826,7 @@ class MainWindow(QMainWindow):
         if self._busy:
             return
         self._busy = True
+        self.account.setEnabled(False)
         self.language_picker.setEnabled(False)
         self._task_verb = verb
         self.session_button.set_state(SessionButton.BUSY, verb + "…")
@@ -740,6 +856,7 @@ class MainWindow(QMainWindow):
         thread.deleteLater()
         ok = error is None
         self._busy = False
+        self.account.setEnabled(True)
         self.language_picker.setEnabled(True)
         self.session_button.setEnabled(True)
         if not ok:
@@ -791,6 +908,10 @@ class MainWindow(QMainWindow):
         log.info("Windows завершает работу — выхожу из аккаунтов")
         block_shutdown(hwnd, tr('Session Controller выходит из твоих аккаунтов…'))
         try:
+            if any(target.id == ACCOUNT_TARGET.id for target in self.session.session_targets()):
+                if not self.account.sign_out():
+                    log.error("Не удалось удалить сохранённый вход в Session Controller")
+                    return
             self.session.end()
         except Exception:
             log.exception("Не удалось завершить сессию при выключении")
@@ -856,6 +977,8 @@ class MainWindow(QMainWindow):
 
     def on_theme_changed(self) -> None:
         # Стиль Qt обновляет сам, а то, что мы рисуем сами, нужно перерисовать.
+        self.account.show_avatar(self.account.avatar_data)
+        self.update_account_icon(self.account.profile_avatar)
         self.refresh()
         for widget in self.findChildren(QWidget):
             widget.update()
@@ -1087,10 +1210,10 @@ def _run(home: Path, minimized: bool, smoke_test: bool) -> int:
             )
         return 0
     create_app_mutex(APP_MUTEX)
-    if autostart.is_supported():
+    if not smoke_test and autostart.is_supported():
         autostart.refresh_path()
 
-    session = Session(home, known_targets())
+    session = Session(home, [*known_targets(), ACCOUNT_TARGET])
     session.load()
 
     window = MainWindow(session, settings, settings_path, themes)

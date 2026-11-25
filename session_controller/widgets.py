@@ -5,7 +5,7 @@
 from session_controller.i18n import tr
 
 from PySide6.QtCore import (
-    Property,
+    Property, QEvent, QPoint,
     QEasingCurve,
     QPointF,
     QPropertyAnimation,
@@ -29,6 +29,7 @@ from PySide6.QtGui import (
     QRadialGradient,
 )
 from PySide6.QtWidgets import (
+    QApplication,
     QAbstractButton,
     QButtonGroup,
     QFrame,
@@ -276,17 +277,144 @@ class RevealRow(QWidget):
         self.setVisible(self.progress > 0)
 
 
+class PinDragLayer(QWidget):
+    """Рисует перестановку поверх списка, пока сам layout хранит конечные позиции."""
+
+    def __init__(self, parent, rows, key, press):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.rows = rows
+        self.key = key
+        first = min(widget.y() for widget in rows.values())
+        bottom = max(widget.geometry().bottom() for widget in rows.values())
+        self.setGeometry(0, first, parent.width(), bottom - first + 1)
+        self.pictures = {k: row.content.grab() for k, row in rows.items()}
+        self.dest = self.slot_positions()
+        self.start = self.dest.copy()
+        self.pointer_y = self.dest[key]
+        self.offset = self.mapFromGlobal(press).y() - self.pointer_y
+        self.t = 0.0
+        self.scale_from, self.scale_to = 1.0, .96
+        self.settling = False
+        self.motion = QVariantAnimation(self)
+        self.motion.setStartValue(0.)
+        self.motion.setEndValue(1.)
+        self.motion.setDuration(155)
+        self.motion.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.motion.valueChanged.connect(self.frame)
+        self.motion.finished.connect(self.finished)
+        self.show()
+        self.raise_()
+        self.motion.start()
+
+    def slot_positions(self):
+        return {key: row.y() - self.y() for key, row in self.rows.items()}
+
+    def position(self, key):
+        if key == self.key and not self.settling:
+            return self.pointer_y
+        return self.start[key] + (self.dest[key] - self.start[key]) * self.t
+
+    def scale(self):
+        return self.scale_from + (self.scale_to - self.scale_from) * self.t
+
+    def follow(self, point):
+        height = self.rows[self.key].content.height()
+        self.pointer_y = max(0, min(self.height() - height, self.mapFromGlobal(point).y() - self.offset))
+        self.update()
+
+    def slide(self, settling=False):
+        starts = {key: self.position(key) for key in self.rows}
+        scale = self.scale()
+        self.motion.stop()
+        self.start, self.dest = starts, self.slot_positions()
+        self.scale_from, self.scale_to = scale, 1. if settling else .96
+        self.settling = settling
+        self.t = 0.
+        self.motion.start()
+
+    def frame(self, value):
+        self.t = value
+        self.update()
+
+    def finished(self):
+        if self.settling:
+            self.hide()
+            self.deleteLater()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), theme.qcolor(theme.current().bg))
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        for key in (*[k for k in self.rows if k != self.key], self.key):
+            image = self.pictures[key]
+            size = image.deviceIndependentSize()
+            factor = self.scale() if key == self.key else 1.
+            width, height = size.width() * factor, size.height() * factor
+            bounds = QRectF((self.width() - width) / 2, self.position(key) + (size.height() - height) / 2,
+                            width, height)
+            painter.drawPixmap(bounds, image, QRectF(image.rect()))
+
+
 class PinButton(QToolButton):
     """Нарисованная векторная булавка с коротким поворотом при закреплении."""
 
-    def __init__(self, parent=None):
+    lifted = Signal(QPointF)
+    tapped = Signal()
+    dragged = Signal(QPointF)
+    dropped = Signal()
+
+    def __init__(self, parent=None, *, reorderable=False):
         super().__init__(parent)
+        self.reorderable = reorderable
+        self.press_origin = None
+        self.dragging = False
         self.motion = QVariantAnimation(self)
         self.motion.setDuration(220)
         self.motion.setEasingCurve(QEasingCurve.Type.OutCubic)
         self.position = 0.0
         self.motion.valueChanged.connect(self._frame)
         self.toggled.connect(self._toggle)
+
+    def enable_drag(self, card):
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.installEventFilter(self)
+        card.installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        kind = event.type()
+        if kind == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            self.press_origin = event.globalPosition()
+            self.dragging = False
+            self.lifted.emit(self.press_origin)
+            if watched is not self:
+                event.accept()
+                return True
+        elif kind == QEvent.Type.MouseMove and self.press_origin is not None:
+            if event.buttons() & Qt.MouseButton.LeftButton:
+                distance = (event.globalPosition() - self.press_origin).manhattanLength()
+                if self.dragging or distance >= QApplication.startDragDistance():
+                    self.dragging = True
+                    self.dragged.emit(event.globalPosition())
+                    return True
+        elif kind == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+            if self.press_origin is not None:
+                self.press_origin = None
+                if self.dragging:
+                    self.dragging = False
+                    self.setDown(False)
+                    self.dropped.emit()
+                    return True
+                self.tapped.emit()
+        elif kind in (QEvent.Type.UngrabMouse, QEvent.Type.Hide) and self.press_origin is not None:
+            self.press_origin = None
+            self.setDown(False)
+            if self.dragging:
+                self.dropped.emit()
+            else:
+                self.tapped.emit()
+            self.dragging = False
+        return super().eventFilter(watched, event)
 
     def _frame(self, value):
         self.position = value
@@ -497,16 +625,16 @@ class PressableIcon(QWidget):
 class SmoothScrollArea(QScrollArea):
     """Прокрутка, которая колёсиком мыши едет плавно, а не прыгает по строкам."""
 
-    STEP = 120  # на сколько пикселей сдвигает один щелчок колёсика
-
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, *, wheel_step: int = 120,
+                 wheel_duration: int = 340) -> None:
         super().__init__(parent)
+        self._wheel_step = wheel_step
         self.setWidgetResizable(True)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._target = 0
         self._animation = QPropertyAnimation(self.verticalScrollBar(), b"value", self)
-        self._animation.setDuration(340)
+        self._animation.setDuration(wheel_duration)
         self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
 
     def sizeHint(self) -> QSize:
@@ -524,7 +652,7 @@ class SmoothScrollArea(QScrollArea):
         bar = self.verticalScrollBar()
         running = self._animation.state() == QPropertyAnimation.State.Running
         start = self._target if running else bar.value()
-        target = int(max(bar.minimum(), min(bar.maximum(), start - delta / 120 * self.STEP)))
+        target = int(max(bar.minimum(), min(bar.maximum(), start - delta / 120 * self._wheel_step)))
         if target == bar.value():
             event.ignore()
             return
