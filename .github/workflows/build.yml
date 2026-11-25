@@ -105,6 +105,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: Session Controller ${{ steps.version.outputs.version }}
+          make_latest: "false"
           body_path: packaging/release-notes.md
           files: dist/SessionController-Setup-${{ steps.version.outputs.version }}.exe
           fail_on_unmatched_files: true
