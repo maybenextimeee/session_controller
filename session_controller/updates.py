@@ -1,12 +1,6 @@
-"""Проверка обновлений: нет ли на GitHub версии новее установленной.
+"""Проверка релиза, отмеченного Latest в репозитории GitHub."""
 
-Раз в сутки программа спрашивает у GitHub, какой релиз последний. Это обычный
-запрос к открытой странице релизов — никаких данных о пользователе в нём нет.
-Если версия новее, в окне появляется кнопка «Новая версия» со ссылкой на загрузку.
-
-Модуль ничего не знает про интерфейс — как session.py.
-"""
-
+import http.client
 import json
 import logging
 import urllib.request
@@ -14,9 +8,7 @@ from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
 
-LATEST_RELEASE_URL = (
-    "https://api.github.com/repos/maybenextimeee/session_controller/releases/latest"
-)
+LATEST_RELEASE_URL = "https://api.github.com/repos/maybenextimeee/session_controller/releases/latest"
 TIMEOUT_SECONDS = 10
 
 
@@ -56,25 +48,14 @@ def parse_release(data: object) -> Release | None:
 
 
 def fetch_latest() -> Release | None:
-    """Последний релиз на GitHub. Сетевые ошибки пробрасывает — пусть решает вызывающий."""
+    """Релиз Latest или None, если GitHub недоступен либо вернул некорректные данные."""
     request = urllib.request.Request(
         LATEST_RELEASE_URL,
         headers={"Accept": "application/vnd.github+json", "User-Agent": "SessionController"},
     )
-    with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
-        return parse_release(json.load(response))
-
-
-def newer_release(current: str) -> Release | None:
-    """Релиз новее текущей версии или None (нет новее или не удалось проверить)."""
     try:
-        release = fetch_latest()
-    except Exception as error:  # нет интернета, GitHub недоступен, лимит запросов…
+        with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+            return parse_release(json.load(response))
+    except (OSError, ValueError, http.client.HTTPException) as error:
         log.info("Не удалось проверить обновления: %s", error)
         return None
-    if release is not None and is_newer(release.version, current):
-        log.info("Доступна новая версия %s", release.version)
-        return release
-    log.info("Обновлений нет (последняя версия на GitHub: %s)",
-             release.version if release else "не найдена")
-    return None

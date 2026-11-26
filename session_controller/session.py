@@ -22,14 +22,14 @@ from session_controller.i18n import tr
 import json
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
 
 import psutil
 
 from session_controller import credentials, processes, registry, snapshot, winapi
-from session_controller.targets import CREDENTIALS, DOWNLOADS, INTERNET_SETTINGS, Target
+from session_controller.targets import CREDENTIALS, DOWNLOADS, INTERNET_SETTINGS, VPN, Target
 
 log = logging.getLogger(__name__)
 
@@ -68,7 +68,10 @@ class Session:
             data = json.loads(self.journal_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             # Сессии нет. Если остался снимок от неудачного старта — он не нужен.
-            snapshot.delete_tree(self.backup_root)
+            try:
+                snapshot.delete_tree(self.backup_root)
+            except OSError:
+                log.exception("Не удалось удалить оставшийся снимок")
             return
 
         self.started_at = datetime.fromisoformat(data["started_at"])
@@ -107,7 +110,8 @@ class Session:
             raise SessionError(tr('Сессия уже идёт'))
         _refuse_if_launched_from(targets)
 
-        processes.close(targets)
+        for group in _close_groups(targets):
+            processes.close(group)
         snapshot.delete_tree(self.backup_root)
 
         entries = []
@@ -134,28 +138,40 @@ class Session:
 
         targets = self.session_targets()
         _refuse_if_launched_from(targets)
-        processes.close(targets)
+        entries = {entry["id"]: entry for entry in self._entries}
+        index = 0
+        for group in _close_groups(targets):
+            processes.close(group)
+            failed = []
+            for target in group:
+                index += 1
+                if progress:
+                    progress(index, len(targets), target.name)
+                try:
+                    self._restore(entries[target.id])
+                except OSError as error:
+                    log.exception("Не удалось очистить %s", target.name)
+                    failed.append(f"{tr(target.name)} — {error}")
+            if failed:
+                raise SessionError(tr('Не удалось очистить: ') + "\n".join(failed))
 
-        failed = []
-        for index, entry in enumerate(self._entries):
-            if progress:
-                progress(index + 1, len(self._entries), entry["name"])
-            try:
-                self._restore(entry)
-            except OSError:
-                log.exception("Не удалось очистить %s", entry["name"])
-                failed.append(entry["name"])
+        self.finish_without_cleanup()
 
-        if failed:
-            # Журнал и снимок оставляем: завершение можно будет просто повторить.
-            raise SessionError(tr('Не удалось очистить: ') + ", ".join(failed))
-
-        snapshot.delete_tree(self.backup_root)
+    def finish_without_cleanup(self) -> None:
+        """Забыть снимок и журнал. Программы и их текущее состояние не трогаем."""
+        if not self.is_active:
+            raise SessionError(tr('Сессия не запущена'))
+        # Сначала фиксируем завершение. При сбое в удалении снимка восстановление
+        # с частично удалённой копией не запустится после перезагрузки.
         self.journal_path.unlink(missing_ok=True)
         self.started_at = None
         self._boot_time = None
         self._entries = []
         log.info("Сессия завершена")
+        try:
+            snapshot.delete_tree(self.backup_root)
+        except OSError as error:
+            raise SessionError(tr('Сессия завершена, но не удалось удалить резервную копию: {0}').format(error)) from error
 
     # ---------- Снимок и восстановление одной программы ----------
 
@@ -187,7 +203,8 @@ class Session:
             existed = os.path.lexists(path)
             if existed:
                 log.info("Снимок: %s (%s)", target.name, path)
-                snapshot.backup(path, self._backup_path(target.id, index), target.skip)
+                snapshot.backup(path, self._backup_path(target.id, index), target.skip,
+                                chatgpt_profile=target.id == "chatgpt_codex")
             entry["paths"].append({"path": str(path), "existed": existed})
 
         for key, name in target.registry_values:
@@ -205,6 +222,27 @@ class Session:
 
         if entry["kind"] == DOWNLOADS:
             _delete_new_downloads(Path(entry["paths"][0]["path"]), entry["downloads"])
+            return
+
+        if entry["id"] == "chatgpt_codex":
+            # Обработать и хранилища настольного ChatGPT, если отдельный файл Codex занят.
+            errors = []
+            for index, item in enumerate(entry["paths"]):
+                source = self._backup_path(entry["id"], index) if item["existed"] else None
+                path = Path(item["path"])
+                try:
+                    try:
+                        snapshot.sync_profile(source, path)
+                    except OSError as error:
+                        if getattr(error, "winerror", None) != 32:
+                            raise
+                        processes.close([_target_from_entry(entry)])
+                        snapshot.sync_profile(source, path)
+                except OSError as error:
+                    log.exception("Не удалось восстановить профиль %s", path)
+                    errors.append(str(error))
+            if errors:
+                raise OSError("\n".join(errors))
             return
 
         for index, item in enumerate(entry["paths"]):
@@ -243,6 +281,17 @@ class Session:
         tmp = self.journal_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, self.journal_path)
+
+
+def _close_groups(targets: list[Target]) -> Iterator[list[Target]]:
+    apps = [target for target in targets if target.kind != VPN]
+    vpns = [target for target in targets if target.kind == VPN]
+    if apps:
+        yield apps
+    if vpns:
+        # Программа могла перезапуститься, пока восстанавливались другие профили.
+        processes.ensure_closed(apps)
+        yield vpns
 
 
 def _delete_new_credentials(before: list[list]) -> None:

@@ -3,7 +3,7 @@
 import base64
 import json
 
-from PySide6.QtCore import QByteArray, QBuffer, QEvent, QIODevice, QRectF, Qt, QUrl, Signal
+from PySide6.QtCore import QByteArray, QBuffer, QEvent, QIODevice, QRect, QRectF, Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QImageReader, QPainter, QPainterPath, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
 from PySide6.QtWidgets import (
@@ -12,6 +12,8 @@ from PySide6.QtWidgets import (
 )
 
 from session_controller import dialogs, theme
+from session_controller.account_limits import MAX_ENTRIES, MAX_FIELDS
+from session_controller.i18n import tr
 from session_controller.widgets import Segmented, SmoothScrollArea
 
 
@@ -84,9 +86,16 @@ class EntryDelegate(QStyledItemDelegate):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(palette.inverse_bg if selected else palette.surface_hover))
             painter.drawRoundedRect(bounds, 6, 6)
-        painter.setPen(QColor(palette.inverse_text if selected else palette.text))
         painter.setFont(option.font)
         text_rect = bounds.adjusted(12, 0, -12, 0)
+        number_width = option.fontMetrics.horizontalAdvance(str(index.model().rowCount())) + 8
+        number_rect = QRect(text_rect)
+        number_rect.setWidth(number_width)
+        painter.setPen(QColor(palette.inverse_text if selected else palette.muted))
+        painter.drawText(number_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                         str(index.row() + 1))
+        text_rect.setLeft(number_rect.right() + 7)
+        painter.setPen(QColor(palette.inverse_text if selected else palette.text))
         label = option.fontMetrics.elidedText(index.data(), Qt.TextElideMode.ElideRight, text_rect.width())
         painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, label)
         painter.restore()
@@ -126,12 +135,18 @@ class EntryEditor(QDialog):
         if entry:
             self.service.setText(entry["service"])
             for field in entry["fields"]:
-                self.add_field(**field)
+                self._append_field(**field)
+            if len(self.fields) > MAX_FIELDS:
+                self.error.setText(tr("В записи может быть не больше 5 полей."))
         else:
             self.add_field("Логин")
             self.add_field("Пароль", secret=True)
 
     def add_field(self, label="", value="", secret=False):
+        if len(self.fields) < MAX_FIELDS:
+            self._append_field(label, value, secret)
+
+    def _append_field(self, label="", value="", secret=False):
         name = line("Название поля", 80)
         name.setText(label)
         content = line("Значение", 1000, secret)
@@ -149,16 +164,21 @@ class EntryEditor(QDialog):
             self.rows_layout.removeWidget(widget)
             widget.hide()
             widget.deleteLater()
-            self.add_button.setEnabled(True)
+            self.add_button.setEnabled(len(self.fields) < MAX_FIELDS)
+            if len(self.fields) <= MAX_FIELDS:
+                self.error.clear()
 
         layout = row(name, content, hidden, button("Убрать", remove))
         layout.setContentsMargins(0, 0, 0, 0)
         widget.setLayout(layout)
         self.rows_layout.addWidget(widget)
         self.fields.append(field)
-        self.add_button.setEnabled(len(self.fields) < 20)
+        self.add_button.setEnabled(len(self.fields) < MAX_FIELDS)
 
     def save(self):
+        if len(self.fields) > MAX_FIELDS:
+            self.error.setText(tr("В записи может быть не больше 5 полей."))
+            return
         service = self.service.text().strip()
         fields = [
             {"label": name.text().strip(), "value": value.text(), "secret": hidden.isChecked()}
@@ -196,24 +216,36 @@ class AccountPage(QWidget):
         controls.addWidget(self.picker)
         self.tabs = QStackedWidget()
         controls.addWidget(self.tabs)
-        account = QFrame()
-        account.setObjectName("panel")
+        account = QWidget()
         account_layout = QVBoxLayout(account)
         profile_scroll = SmoothScrollArea()
         profile_scroll.setWidget(account)
         self.tabs.addWidget(profile_scroll)
 
-        self.login_box = QWidget()
+        self.login_box = QFrame()
+        self.login_box.setObjectName("panel")
         account_layout.addWidget(self.login_box)
-        auth = QFormLayout(self.login_box)
+        login_layout = QVBoxLayout(self.login_box)
+        login_layout.setContentsMargins(18, 18, 18, 18)
+        login_layout.setSpacing(8)
+        auth = QFormLayout()
+        login_layout.addLayout(auth)
         self.login = line("От 3 до 32 символов, латиница или цифры", 32)
         self.password = line("От 8 символов", 128, True)
         auth.addRow("Логин", self.login)
         auth.addRow("Пароль", self.password)
-        login_button = button("Войти", self.sign_in)
-        login_button.setObjectName("dialogPrimary")
-        self.password.returnPressed.connect(self.sign_in)
-        auth.addRow(row(login_button, button("Зарегистрироваться", self.register)))
+        self.confirm_password = line("Введи пароль ещё раз", 128, True)
+        auth.addRow("Повтори пароль", self.confirm_password)
+        self.auth_form = auth
+        self.password.returnPressed.connect(self.submit_auth)
+        self.confirm_password.returnPressed.connect(self.submit_auth)
+        login_layout.addStretch(1)
+        self.submit_button = button("Войти", self.submit_auth)
+        self.submit_button.setObjectName("dialogPrimary")
+        self.submit_button.setMinimumHeight(44)
+        self.mode_button = button("Зарегистрироваться", self.toggle_auth_mode)
+        login_layout.addWidget(self.submit_button)
+        login_layout.addWidget(self.mode_button)
 
         self.pending_profile = QWidget()
         pending_layout = QVBoxLayout(self.pending_profile)
@@ -232,26 +264,30 @@ class AccountPage(QWidget):
 
         overview = QWidget()
         summary = QVBoxLayout(overview)
-        summary.setContentsMargins(24, 24, 24, 20)
+        summary.setContentsMargins(0, 0, 0, 0)
         summary.setSpacing(18)
         self.portrait = QLabel()
-        self.portrait.setFixedSize(76, 76)
+        self.portrait.setFixedSize(56, 56)
         self.identity = QLabel()
         self.identity.setObjectName("profileName")
         self.identity.setTextFormat(Qt.TextFormat.PlainText)
         self.identity.setWordWrap(True)
-        hero = QHBoxLayout()
-        hero.setSpacing(16)
+        identity_card = QFrame()
+        identity_card.setObjectName("panel")
+        hero = QHBoxLayout(identity_card)
+        hero.setContentsMargins(16, 10, 16, 10)
+        hero.setSpacing(12)
         hero.addWidget(self.portrait)
         hero.addWidget(self.identity, 1)
-        summary.addLayout(hero)
+        summary.addWidget(identity_card)
         summary.addStretch(1)
         logout = button("Выйти из аккаунта", self.confirm_sign_out)
         logout.setObjectName("accountLogout")
         summary.addLayout(row(button("Редактировать профиль", self.edit_profile), logout))
         self.profile_stack.addWidget(overview)
 
-        editor = QWidget()
+        editor = QFrame()
+        editor.setObjectName("panel")
         form = QVBoxLayout(editor)
         form.setContentsMargins(24, 18, 24, 18)
         form.setSpacing(10)
@@ -282,14 +318,18 @@ class AccountPage(QWidget):
         self.entries.setObjectName("accountEntries")
         self.entries.setItemDelegate(EntryDelegate(self.entries))
         self.entries.setMouseTracking(True)
+        self.entries.setDragDropMode(QListWidget.DragDropMode.InternalMove)
+        self.entries.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.entries.setDragDropOverwriteMode(False)
+        self.entries.model().rowsMoved.connect(self.entry_moved)
         QApplication.instance().installEventFilter(self)
         self.entries.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.entries.customContextMenuRequested.connect(self.entry_menu)
         self.entries.itemDoubleClicked.connect(lambda _item: self.edit_entry())
         entries_layout.addWidget(self.entries)
-        create = button("Новая запись", self.new_entry)
-        create.setObjectName("dialogPrimary")
-        entries_layout.addLayout(row(create, button("Обновить", self.load_entries)))
+        self.create_button = button("Новая запись", self.new_entry)
+        self.create_button.setObjectName("dialogPrimary")
+        entries_layout.addLayout(row(self.create_button, button("Обновить", self.load_entries)))
 
         self.status = QLabel()
         self.status.setObjectName("small")
@@ -318,12 +358,15 @@ class AccountPage(QWidget):
         url.setPath("")
         return url
 
-    def request(self, method, path, done, data=None, *, revoke_token=""):
+    def request(self, method, path, done, data=None, *, revoke_token="", on_error=None,
+                not_found_message=None):
         if self.reply is not None and not revoke_token:
             return
         try:
             url = self.server_url()
         except ValueError as error:
+            if on_error:
+                on_error()
             self.show_error(str(error))
             return
         url.setPath(path)
@@ -371,11 +414,17 @@ class AccountPage(QWidget):
                 self.status.clear()
                 done(payload)
                 return
+            if on_error:
+                on_error()
             if self.token and code == 401 and not self.sign_out(revoke=False):
                 return
             detail = payload.get("detail") if isinstance(payload, dict) else None
-            if isinstance(detail, str):
-                self.show_error(detail)
+            if code == 404 and detail in ("Not Found", None):
+                self.show_error(tr(not_found_message or "Сервер не нашёл запрошенный адрес."))
+            elif isinstance(detail, str):
+                self.show_error(tr(detail))
+            elif code == 422 and path.startswith("/entries"):
+                self.show_error("Проверь название сервиса и поля записи (от 1 до 5).")
             elif code == 422:
                 self.show_error("Проверь поля формы. Логин — 3–32 символа, пароль — от 8.")
             elif code is not None and 200 <= code < 300:
@@ -403,8 +452,33 @@ class AccountPage(QWidget):
     def credentials(self):
         return {"login": self.login.text().strip(), "password": self.password.text()}
 
-    def register(self):
-        self.request("POST", "/register", lambda _data: self.sign_in(), self.credentials())
+    def set_registration(self, enabled):
+        self.registering = enabled
+        self.confirm_password.clear()
+        self.auth_form.setRowVisible(self.confirm_password, enabled)
+        self.submit_button.setText("Создать аккаунт" if enabled else "Войти")
+        self.mode_button.setText("Вернуться ко входу" if enabled else "Зарегистрироваться")
+        self.status.clear()
+        self.status.hide()
+
+    def toggle_auth_mode(self):
+        self.set_registration(not self.registering)
+
+    def submit_auth(self):
+        if not self.registering:
+            self.sign_in()
+            return
+        if self.password.text() != self.confirm_password.text():
+            self.show_error("Пароли не совпадают.")
+            self.confirm_password.setFocus()
+            self.confirm_password.selectAll()
+            return
+
+        def registered(_data):
+            self.set_registration(False)
+            self.sign_in()
+
+        self.request("POST", "/register", registered, self.credentials())
 
     def sign_in(self):
         def signed_in(data):
@@ -443,6 +517,7 @@ class AccountPage(QWidget):
         return True
 
     def reset_profile(self):
+        self.set_registration(False)
         self.password.clear()
         self.name.clear()
         self.identity.clear()
@@ -450,7 +525,7 @@ class AccountPage(QWidget):
         self.show_avatar("")
         self.profile_avatar = ""
         self.avatar_changed.emit("")
-        self.entries.clear()
+        self.show_entries([])
         self.tabs.setCurrentIndex(0)
         self.picker.buttons["profile"].setChecked(True)
         self.picker.buttons["entries"].setEnabled(False)
@@ -464,7 +539,7 @@ class AccountPage(QWidget):
         self.name.setText(data["name"])
         self.show_avatar(data["avatar"])
         self.profile_avatar = data["avatar"]
-        self.portrait.setPixmap(avatar_pixmap(self.profile_avatar, 76))
+        self.portrait.setPixmap(avatar_pixmap(self.profile_avatar, self.portrait.width()))
         self.avatar_changed.emit(self.profile_avatar)
         self.login_box.hide()
         self.pending_profile.hide()
@@ -561,14 +636,33 @@ class AccountPage(QWidget):
             self.delete_entry()
 
     def load_entries(self):
-        def loaded(data):
-            self.entries.clear()
-            for entry in data:
-                item = QListWidgetItem(entry["service"])
-                item.setData(Qt.ItemDataRole.UserRole, entry["id"])
-                self.entries.addItem(item)
+        self.request("GET", "/entries", self.show_entries)
 
-        self.request("GET", "/entries", loaded)
+    def show_entries(self, data):
+        selected = self.entries.currentItem()
+        selected_id = selected.data(Qt.ItemDataRole.UserRole) if selected else None
+        self.saved_entries = data
+        has_room = len(data) < MAX_ENTRIES
+        self.create_button.setEnabled(has_room)
+        self.create_button.setToolTip("" if has_room else tr("Можно сохранить до 50 записей на аккаунт."))
+        self.entries.clear()
+        for entry in data:
+            item = QListWidgetItem(entry["service"])
+            item.setData(Qt.ItemDataRole.UserRole, entry["id"])
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsDropEnabled)
+            self.entries.addItem(item)
+            if entry["id"] == selected_id:
+                self.entries.setCurrentItem(item)
+
+    def entry_moved(self, _source, first, _last, _parent, destination):
+        # Qt сообщает позицию вставки до извлечения перемещаемой строки.
+        row_index = destination - 1 if first < destination else destination
+        entry_id = self.entries.item(row_index).data(Qt.ItemDataRole.UserRole)
+        following = self.entries.item(row_index + 1)
+        before_id = following.data(Qt.ItemDataRole.UserRole) if following else None
+        self.request("PUT", f"/entries/{entry_id}/position", self.show_entries,
+                     {"before_id": before_id}, on_error=lambda: self.show_entries(self.saved_entries),
+                     not_found_message="Сервер не поддерживает изменение порядка. Обнови и перезапусти сервер аккаунтов.")
 
     def open_editor(self, entry=None):
         generation = self.generation

@@ -22,6 +22,8 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
+from session_controller.account_limits import MAX_ENTRIES, MAX_FIELDS
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY, login TEXT NOT NULL UNIQUE, password TEXT NOT NULL,
@@ -32,7 +34,7 @@ CREATE TABLE IF NOT EXISTS tokens (
 );
 CREATE TABLE IF NOT EXISTS entries (
     id TEXT PRIMARY KEY, owner TEXT NOT NULL REFERENCES users(id),
-    service TEXT NOT NULL, fields TEXT NOT NULL
+    service TEXT NOT NULL, fields TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -91,7 +93,19 @@ class EntryField(BaseModel):
 
 class Entry(BaseModel):
     service: Text
-    fields: Annotated[list[EntryField], Field(min_length=1, max_length=20)]
+    fields: Annotated[list[EntryField], Field(min_length=1, max_length=MAX_FIELDS)]
+
+
+class EntryMove(BaseModel):
+    before_id: Annotated[str, Field(min_length=1, max_length=32)] | None
+
+
+def ordered_entries(db, owner: str):
+    rows = db.execute(
+        "SELECT id, service FROM entries WHERE owner=? ORDER BY position, service COLLATE NOCASE, id",
+        (owner,),
+    )
+    return [dict(row) for row in rows]
 
 
 def digest(value: str) -> str:
@@ -125,6 +139,9 @@ def initialize(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with database(path) as db:
         db.executescript(SCHEMA)
+        db.execute("BEGIN IMMEDIATE")
+        if not any(row["name"] == "position" for row in db.execute("PRAGMA table_info(entries)")):
+            db.execute("ALTER TABLE entries ADD COLUMN position INTEGER NOT NULL DEFAULT 0")
 
 
 def create_app(path: Path) -> FastAPI:
@@ -230,11 +247,26 @@ def create_app(path: Path) -> FastAPI:
     @app.get("/entries")
     def list_entries(identity=Depends(authorized)):
         with database(path) as db:
-            rows = db.execute(
-                "SELECT id, service FROM entries WHERE owner=? ORDER BY service COLLATE NOCASE, id",
-                (identity[0],),
-            )
-            return [dict(row) for row in rows]
+            return ordered_entries(db, identity[0])
+
+    @app.put("/entries/{entry_id}/position")
+    def move_entry(entry_id: str, data: EntryMove, identity=Depends(authorized)):
+        owner = identity[0]
+        with database(path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            entries = ordered_entries(db, owner)
+            ids = [row["id"] for row in entries]
+            if entry_id not in ids or (data.before_id is not None and data.before_id not in ids):
+                raise HTTPException(409, "Список записей изменился. Нажми «Обновить».")
+            if entry_id == data.before_id:
+                return entries
+            entry = entries.pop(ids.index(entry_id))
+            ids.remove(entry_id)
+            index = len(entries) if data.before_id is None else ids.index(data.before_id)
+            entries.insert(index, entry)
+            db.executemany("UPDATE entries SET position=? WHERE owner=? AND id=?",
+                           ((i, owner, row["id"]) for i, row in enumerate(entries)))
+            return entries
 
     @app.get("/entries/{entry_id}")
     def read_entry(entry_id: str, identity=Depends(authorized)):
@@ -256,7 +288,14 @@ def create_app(path: Path) -> FastAPI:
         entry_id = uuid4().hex
         service, fields = entry_values(data)
         with database(path) as db:
-            db.execute("INSERT INTO entries VALUES (?, ?, ?, ?)", (entry_id, identity[0], service, fields))
+            inserted = db.execute(
+                "INSERT INTO entries (id, owner, service, fields, position) "
+                "SELECT ?, ?, ?, ?, COALESCE(MAX(position), -1) + 1 FROM entries "
+                "WHERE owner=? HAVING COUNT(*) < ?",
+                (entry_id, identity[0], service, fields, identity[0], MAX_ENTRIES),
+            )
+            if not inserted.rowcount:
+                raise HTTPException(409, "Можно сохранить до 50 записей на аккаунт.")
         return {"id": entry_id}
 
     @app.put("/entries/{entry_id}")

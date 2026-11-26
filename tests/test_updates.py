@@ -35,12 +35,15 @@ def test_parse_release():
     assert parse_release(["не", "словарь"]) is None
 
 
-def test_newer_release_from_github(monkeypatch):
-    answer = {"tag_name": "v0.7.0", "html_url": "https://example/v0.7.0"}
-    monkeypatch.setattr(updates.urllib.request, "urlopen",
-                        lambda *_a, **_k: io.BytesIO(json.dumps(answer).encode()))
-    assert updates.newer_release("0.6.0") == Release("0.7.0", "https://example/v0.7.0")
-    assert updates.newer_release("0.7.0") is None
+def test_fetches_github_latest(monkeypatch):
+    answer = {"tag_name": "v0.7.1", "html_url": "https://example/v0.7.1"}
+
+    def github(request, timeout):
+        assert request.full_url.endswith("/releases/latest")
+        return io.BytesIO(json.dumps(answer).encode())
+
+    monkeypatch.setattr(updates.urllib.request, "urlopen", github)
+    assert updates.fetch_latest() == Release("0.7.1", answer["html_url"])
 
 
 def test_no_internet_is_quiet(monkeypatch):
@@ -48,4 +51,4 @@ def test_no_internet_is_quiet(monkeypatch):
         raise OSError("сети нет")
 
     monkeypatch.setattr(updates.urllib.request, "urlopen", fail)
-    assert updates.newer_release("0.6.0") is None
+    assert updates.fetch_latest() is None

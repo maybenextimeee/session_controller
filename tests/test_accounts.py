@@ -64,7 +64,17 @@ def test_account_client_and_account_isolation(tmp_path, monkeypatch):
             password = "test-pass-123"
             window.login.setText("student")
             window.password.setText(password)
-            window.register()
+            assert window.confirm_password.isHidden()
+            window.mode_button.click()
+            assert window.confirm_password.isVisible() and window.reply is None
+            window.confirm_password.setText("another-password")
+            window.submit_button.click()
+            assert window.status.text() == "Пароли не совпадают." and window.reply is None
+            window.mode_button.click()
+            assert window.confirm_password.isHidden() and window.confirm_password.text() == ""
+            window.mode_button.click()
+            window.confirm_password.setText(password)
+            window.confirm_password.returnPressed.emit()
             wait_until(lambda: bool(window.identity.text()))
             assert storage.load(address) == window.token
             assert storage.load("https://another-server.example") == ""
@@ -107,6 +117,31 @@ def test_account_client_and_account_isolation(tmp_path, monkeypatch):
 
             entry = api("GET", "/entries", token=window.token)[0]
             assert entry["service"] == "Учебный GitHub"
+            # Новая запись добавляется в конец, даже если по алфавиту была бы первой.
+            extra = api("POST", "/entries", {**editor.result_data, "service": "AAA"}, window.token)
+            window.tab_changed("entries")
+            wait_until(lambda: window.entries.count() == 2)
+            from PySide6.QtCore import QModelIndex
+            model = window.entries.model()
+            assert window.entries.item(0).text() == entry["service"]
+            with monkeypatch.context() as legacy:
+                # На старом сервере маршрут перестановки отсутствует.
+                send_request = window.request
+                legacy.setattr(window, "request", lambda method, path, *args, **kwargs:
+                               send_request(method, "/missing" + path, *args, **kwargs))
+                assert model.moveRow(QModelIndex(), 0, QModelIndex(), 2)
+                wait_until(lambda: window.controls.isEnabled())
+                assert "перезапусти сервер" in window.status.text()
+                assert window.entries.item(0).text() == entry["service"]
+
+            assert model.moveRow(QModelIndex(), 0, QModelIndex(), 2)
+            wait_until(lambda: window.controls.isEnabled())
+            moved = [row["id"] for row in api("GET", "/entries", token=window.token)]
+            assert moved == [extra["id"], entry["id"]]
+            window.load_entries()
+            wait_until(lambda: window.controls.isEnabled())
+            assert window.entries.item(0).text() == "AAA"
+
             path = "/entries/" + entry["id"]
             original = api("GET", path, token=window.token)
             assert original["fields"][2]["label"] == "Почта"
@@ -119,11 +154,50 @@ def test_account_client_and_account_isolation(tmp_path, monkeypatch):
                 api("POST", "/register", second)
             other_token = api("POST", "/login", second)["token"]
             assert api("GET", "/entries", token=other_token) == []
+            with pytest.raises(HTTPError, match="409"):
+                api("PUT", path + "/position", {"before_id": None}, other_token)
+            # Устаревший список: цель перемещения уже удалена на другом ПК.
+            api("DELETE", "/entries/" + extra["id"], token=window.token)
+            assert model.moveRow(QModelIndex(), 1, QModelIndex(), 0)
+            wait_until(lambda: window.controls.isEnabled())
+            assert window.status.isVisible() and window.entries.item(0).text() == "AAA"
+            window.load_entries()
+            wait_until(lambda: window.entries.count() == 1)
+            assert window.entries.item(0).data(Qt.ItemDataRole.UserRole) == entry["id"]
             with pytest.raises(HTTPError, match="404"):
                 api("GET", path, token=other_token)
 
             token = window.token
+            five_fields = {"service": "Пять", "fields": [{"label": str(n)} for n in range(5)]}
+            too_many = {**five_fields, "fields": five_fields["fields"] + [{"label": "6"}]}
+            with pytest.raises(HTTPError, match="422"):
+                api("POST", "/entries", too_many, token)
+            with pytest.raises(HTTPError, match="422"):
+                api("PUT", path, too_many, token)
+            api("PUT", path, five_fields, token)
+
+            # Два клиента претендуют на последнее свободное место.
+            from concurrent.futures import ThreadPoolExecutor
+            for _ in range(48):
+                api("POST", "/entries", five_fields, token)
+
+            def create_at_limit(_):
+                try:
+                    api("POST", "/entries", five_fields, token)
+                    return 201
+                except HTTPError as error:
+                    return error.code
+
+            with ThreadPoolExecutor(2) as pool:
+                assert sorted(pool.map(create_at_limit, range(2))) == [201, 409]
+            api("POST", "/entries", five_fields, other_token)
+            window.load_entries()
+            wait_until(lambda: window.entries.count() == 50)
+            assert not window.create_button.isEnabled()
             api("DELETE", path, token=token)
+            window.load_entries()
+            wait_until(lambda: window.entries.count() == 49)
+            assert window.create_button.isEnabled()
             window.hide()
             monkeypatch.setattr(app, "INSTANCE_SERVER", str(uuid4()))
             session = Session(tmp_path / "session", [ACCOUNT_TARGET])
@@ -165,6 +239,30 @@ def test_account_client_and_account_isolation(tmp_path, monkeypatch):
             thread.join(timeout=5)
 
 
+def test_editor_limits_without_truncating_legacy_fields(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QPushButton
+    from session_controller.account_page import EntryEditor
+
+    qt = QApplication.instance() or QApplication([])
+    editor = EntryEditor(None)
+    for _ in range(6):
+        editor.add_field("Поле")
+    assert len(editor.fields) == 5 and not editor.add_button.isEnabled()
+
+    legacy = EntryEditor(None, {"service": "Test", "fields": [{"label": str(i)} for i in range(7)]})
+    assert len(legacy.fields) == 7
+    legacy.save()
+    assert legacy.result_data is None
+    for remaining in (6, 5, 4):
+        row = legacy.rows_layout.itemAt(0).widget()
+        row.findChild(QPushButton).click()
+        assert len(legacy.fields) == remaining
+        assert legacy.add_button.isEnabled() == (remaining < 5)
+    legacy.save()
+    assert len(legacy.result_data["fields"]) == 4
+
+
 def test_existing_data_and_default_server_address(tmp_path, monkeypatch):
     from session_controller.account_storage import ACCOUNT_SERVER, server_address
     from session_controller.paths import app_home
@@ -181,6 +279,22 @@ def test_existing_data_and_default_server_address(tmp_path, monkeypatch):
     (previous / "server.txt").write_text("http://127.0.0.1:8000", encoding="utf-8")
     assert app_home() == previous
     assert server_address(previous) == "http://127.0.0.1:8000"
+
+
+def test_existing_entries_keep_their_order_after_migration(tmp_path):
+    import sqlite3
+    pytest.importorskip("fastapi")
+    from server.accounts import database, initialize, ordered_entries
+
+    path = tmp_path / "previous.sqlite3"
+    with sqlite3.connect(path) as old:
+        old.execute("CREATE TABLE entries (id TEXT PRIMARY KEY, owner TEXT, service TEXT, fields TEXT)")
+        old.executemany("INSERT INTO entries VALUES (?, 'user', ?, '[]')",
+                        [("c", "Steam"), ("b", "github"), ("a", "GitHub")])
+    initialize(path)
+    initialize(path)
+    with database(path) as db:
+        assert [row["id"] for row in ordered_entries(db, "user")] == ["a", "b", "c"]
 
 
 def test_existing_server_database_is_reused(tmp_path, monkeypatch):

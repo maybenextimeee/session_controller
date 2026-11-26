@@ -21,7 +21,12 @@ def test_window_survives_start_and_end(tmp_path, monkeypatch):
     profile = tmp_path / "demo"
     profile.mkdir()
     target = Target("demo", "Demo", paths=(profile,))
-    window = ui.MainWindow(Session(tmp_path / "state", [target]), Settings(),
+    missing = Target("clash_verge", "Clash Verge", paths=(tmp_path / "absent",))
+    unchecked_profile = tmp_path / "unchecked"
+    unchecked_profile.mkdir()
+    unchecked = Target("unchecked", "Unchecked", paths=(unchecked_profile,))
+    settings = Settings(disabled_targets=[unchecked.id], pinned_targets=[])
+    window = ui.MainWindow(Session(tmp_path / "state", [target, missing, unchecked]), settings,
                            tmp_path / "settings.json", theme.ThemeManager(app, "dark"))
     window.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
     window.show()
@@ -37,6 +42,12 @@ def test_window_survives_start_and_end(tmp_path, monkeypatch):
 
     try:
         assert window.minimumSize() == window.maximumSize()
+        monkeypatch.setattr(ui, "__version__", "0.8.0")
+        for version in ("0.8.1", "0.7.1", "0.8"):
+            window.on_update_found(version, "https://example.test/release")
+            assert window.update_button.isHidden() == (version == "0.8")
+            if version != "0.8":
+                assert version in window.update_button.text()
         window.show_all_programs()
         QTest.qWait(340)
         pin = window.pin_buttons["demo"][1]
@@ -66,6 +77,10 @@ def test_window_survives_start_and_end(tmp_path, monkeypatch):
         window.session_button.click()
         wait_for_session()
         assert window.session.is_active
+        assert [t.id for t in window.session.session_targets()] == [target.id]
+        missing.paths[0].mkdir()
+        for folder in (missing.paths[0], unchecked_profile):
+            (folder / "keep").touch()
         assert window.session_button._subtitle.startswith("С ")
         new_file = profile / "session-only"
         new_file.touch()
@@ -78,10 +93,60 @@ def test_window_survives_start_and_end(tmp_path, monkeypatch):
         window.session_button.click()
         wait_for_session()
         assert not window.session.is_active and not new_file.exists()
+        assert all((folder / "keep").exists() for folder in (missing.paths[0], unchecked_profile))
     finally:
         window.instance_server.close()
         window.tray.hide()
         window.hide()
+        window.deleteLater()
+        app.processEvents()
+
+
+def test_end_session_context_menu_keeps_apps_and_logins(tmp_path, monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(ui, "INSTANCE_SERVER", str(uuid4()))
+    profile = tmp_path / "profile"
+    profile.write_text("before")
+    target = Target("example", "Example", paths=(profile,))
+    session = Session(tmp_path / "state", [target])
+    window = ui.MainWindow(session, Settings(), tmp_path / "settings.json",
+                           theme.ThemeManager(app, "dark"))
+    session.start([target])
+    profile.write_text("during")
+    window.refresh()
+    def choose_keep():
+        button.customContextMenuRequested.emit(button.rect().center())
+        menu = app.activePopupWidget()
+        assert isinstance(menu, ui.QMenu)
+        assert [action.text() for action in menu.actions()] == [
+            ui.tr("Завершить сессию"), ui.tr("Завершить без выхода из аккаунтов")]
+        menu.setActiveAction(menu.actions()[1])
+        QTest.keyClick(menu, Qt.Key.Key_Return)
+
+    monkeypatch.setattr(window, "sign_out_session_account", lambda: pytest.fail("unexpected logout"))
+    monkeypatch.setattr(ui.Session, "end", lambda *_: pytest.fail("unexpected cleanup"))
+    button = window.session_button
+    try:
+        monkeypatch.setattr(ui.dialogs, "confirm", lambda *_: False)
+        choose_keep()
+        assert session.is_active and not window._busy
+        monkeypatch.setattr(ui.dialogs, "confirm", lambda *_: True)
+        choose_keep()
+        for _ in range(250):
+            if not window._busy:
+                break
+            QTest.qWait(20)
+        assert not window._busy and not session.is_active
+        assert profile.read_text() == "during"
+        assert not session.journal_path.exists() and not session.backup_root.exists()
+        reloaded = Session(session.home, [target])
+        reloaded.load()
+        assert not reloaded.is_active
+        assert button.text() == ui.tr("Начать сессию")
+    finally:
+        window.instance_server.close()
+        window.tray.hide()
         window.deleteLater()
         app.processEvents()
 
@@ -128,6 +193,40 @@ def test_session_button_paints_start_transition(monkeypatch, palette):
         assert colors() == [palette.bg, palette.bg]
     finally:
         button.close()
+
+
+def test_only_pinned_rows_scroll(tmp_path, monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(ui, "INSTANCE_SERVER", str(uuid4()))
+    targets = [Target(str(i), str(i), paths=(tmp_path,)) for i in range(18)]
+    window = ui.MainWindow(Session(tmp_path / "state", targets),
+                           Settings(pinned_targets=[t.id for t in targets]),
+                           tmp_path / "settings.json", theme.ThemeManager(app, "dark"))
+    window.show()
+    try:
+        app.processEvents()
+        heading = window.main_page.findChild(ui.QLabel, "homeHeading")
+        catalog = window.main_page.findChild(QPushButton, "moreButton")
+        fixed = [window.account_button, heading, catalog, window.session_button]
+        def y(widget):
+            return widget.mapToGlobal(widget.rect().topLeft()).y()
+
+        before = [y(widget) for widget in fixed]
+        first = window.home_rows["0"]
+        top = y(first)
+        bar = window.main_scroll.verticalScrollBar()
+        assert bar.maximum() > 0
+        bar.setValue(bar.maximum())
+        app.processEvents()
+        assert y(first) < top
+        assert [y(widget) for widget in fixed] == before
+    finally:
+        window.instance_server.close()
+        window.tray.hide()
+        window.hide()
+        window.deleteLater()
+        app.processEvents()
 
 
 def test_drag_pin_persists_order_without_unpinning(tmp_path, monkeypatch):
