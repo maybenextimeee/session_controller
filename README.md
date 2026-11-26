@@ -20,8 +20,6 @@
   <a href="docs/media/session-controller.mp4"><img src="docs/media/session-controller.gif" width="720" alt="Демонстрация Session Controller: выбор программ, начало и завершение сессии"></a>
 </p>
 
-<p align="center"><a href="docs/media/session-controller.mp4">Открыть ролик со звуком</a></p>
-
 ## Как это работает
 
 1. Выберите в каталоге установленные программы, которые хотите включить в сессию.
