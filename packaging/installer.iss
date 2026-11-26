@@ -11,6 +11,10 @@
   #define AppVersion "0.0.0"
 #endif
 
+#ifndef AppFiles
+  #define AppFiles "..\dist\SessionController"
+#endif
+
 #define AppName "Session Controller"
 #define AppExe "SessionController.exe"
 #define RunKey "Software\Microsoft\Windows\CurrentVersion\Run"
@@ -20,7 +24,8 @@ AppId={{8B37DFCD-D8ED-4958-9572-DE8152E25885}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
-AppPublisher=maybenextimeee
+AppPublisher=maybenextime
+VersionInfoCompany=maybenextime
 AppPublisherURL=https://github.com/maybenextimeee/session_controller
 AppSupportURL=https://github.com/maybenextimeee/session_controller/issues
 DefaultDirName={autopf}\{#AppName}
@@ -57,7 +62,7 @@ Name: "autostart"; Description: "{cm:AutoStart}"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "..\dist\SessionController\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#AppFiles}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [InstallDelete]
 ; При обновлении убираем файлы прошлой версии, чтобы не смешивались библиотеки.

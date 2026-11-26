@@ -1,4 +1,4 @@
-﻿# Сборка Session Controller на своём компьютере: exe и установщик.
+# Сборка Session Controller на своём компьютере: exe и установщик.
 #
 # Запуск из корня репозитория:
 #     powershell -ExecutionPolicy Bypass -File packaging\build.ps1
@@ -11,7 +11,7 @@ Set-Location (Split-Path $PSScriptRoot -Parent)
 
 $python = ".\.venv\Scripts\python.exe"
 if (-not (Test-Path $python)) {
-    throw "Не найдена виртуальная среда .venv — см. docs\DEVELOPMENT.md"
+    throw "Не найдена виртуальная среда .venv. Перед сборкой создайте её и установите зависимости из requirements-dev.txt."
 }
 
 & $python -m PyInstaller --noconfirm --clean packaging\SessionController.spec

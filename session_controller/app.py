@@ -115,7 +115,6 @@ class _UpdateChecker(QObject):
 
     found = Signal(str, str)  # версия, ссылка на страницу загрузки
 
-    FIRST_CHECK_MS = 15_000            # через 15 секунд после запуска
     INTERVAL_MS = 24 * 60 * 60 * 1000  # потом раз в сутки
 
     def __init__(self, parent: QObject, enabled: Callable[[], bool]) -> None:
@@ -125,7 +124,7 @@ class _UpdateChecker(QObject):
         self._timer.timeout.connect(self.check)
 
     def start(self) -> None:
-        QTimer.singleShot(self.FIRST_CHECK_MS, self.check)
+        self.check()
         self._timer.start(self.INTERVAL_MS)
 
     def check(self) -> None:
@@ -133,7 +132,7 @@ class _UpdateChecker(QObject):
             threading.Thread(target=self._run, daemon=True).start()
 
     def _run(self) -> None:
-        release = updates.newer_release(__version__)
+        release = updates.fetch_latest()
         if release is not None:
             self.found.emit(release.version, release.url)
 
@@ -248,7 +247,7 @@ class MainWindow(QMainWindow):
         self.update_button = QPushButton()
         self.update_button.setObjectName("updateButton")
         self.update_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.update_button.setToolTip(tr('Открыть страницу загрузки новой версии'))
+        self.update_button.setToolTip(tr('Открыть страницу релиза на GitHub'))
         self.update_button.clicked.connect(self.open_update_page)
         self.update_button.hide()
 
@@ -259,12 +258,8 @@ class MainWindow(QMainWindow):
         header.addWidget(self.update_button)
         header.addWidget(settings_button)
 
-        # Что очищать.
-        targets_header = QHBoxLayout()
-        heading = QLabel(tr("Закреплённые"))
+        heading = QLabel(tr("Закреплённые приложения"))
         heading.setObjectName("homeHeading")
-        targets_header.addWidget(heading)
-        targets_header.addStretch(1)
 
         # Найденные на компьютере программы можно включать и выключать.
         # Новая программа появится здесь после перезапуска Session Controller.
@@ -292,17 +287,12 @@ class MainWindow(QMainWindow):
         all_button.setCursor(Qt.CursorShape.PointingHandCursor)
         all_button.clicked.connect(self.show_all_programs)
 
-        # Если программ много или экран маленький, главная страница прокручивается.
+        # Шапка и кнопки остаются на месте при прокрутке карточек.
         layout = QVBoxLayout(self.main_content)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addLayout(header)
-        layout.addSpacing(26)
-        layout.addLayout(targets_header)
-        layout.addSpacing(10)
         layout.addLayout(self.pin_list)
         layout.addWidget(self.empty_pins)
-        layout.addWidget(all_button)
         layout.addStretch(1)
 
         self.main_scroll = SmoothScrollArea()
@@ -311,13 +301,21 @@ class MainWindow(QMainWindow):
         # Одна кнопка внизу окна — всё о сессии написано прямо на ней.
         self.session_button = SessionButton()
         self.session_button.clicked.connect(self.toggle_session)
+        self.session_button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.session_button.customContextMenuRequested.connect(self.session_menu)
 
         page = QWidget()
         page_layout = QVBoxLayout(page)
         page_layout.setContentsMargins(0, 0, 0, 0)
         page_layout.setSpacing(0)
+        page_layout.addLayout(header)
+        page_layout.addSpacing(14)
+        page_layout.addWidget(heading)
+        page_layout.addSpacing(14)
         page_layout.addWidget(self.main_scroll, 1)
-        page_layout.addSpacing(32)
+        page_layout.addSpacing(6)
+        page_layout.addWidget(all_button)
+        page_layout.addSpacing(16)
         page_layout.addWidget(self.session_button)
         return page
 
@@ -686,12 +684,9 @@ class MainWindow(QMainWindow):
     # ---------- Сессия ----------
 
     def selected_targets(self) -> list[Target]:
-        """Что очищать в новой сессии: всё, кроме снятых галочек.
-
-        Программы, которых на компьютере пока нет, тоже включены: если их
-        установят и запустят во время сессии, следы тоже удалятся.
-        """
-        return [t for t in self.session.targets if t.id not in self.settings.disabled_targets]
+        """Выбранные переключателями программы, включая незакреплённые."""
+        return [target for target in self.session.targets
+                if target.id in self.target_cards and self.target_cards[target.id].switch.isChecked()]
 
     def toggle_session(self) -> None:
         if self._busy:
@@ -701,15 +696,34 @@ class MainWindow(QMainWindow):
         else:
             self.start_session()
 
+    def session_menu(self, pos: QPoint) -> None:
+        if self._busy or not self.session.is_active:
+            return
+        menu = QMenu(self.session_button)
+        menu.addAction(tr('Завершить сессию'), lambda: self.end_session())
+        menu.addAction(tr('Завершить без выхода из аккаунтов'), self.end_without_cleanup)
+        menu.aboutToHide.connect(menu.deleteLater)
+        menu.popup(self.session_button.mapToGlobal(pos))
+
+    def end_without_cleanup(self) -> None:
+        if self._busy or not self.session.is_active:
+            return
+        if dialogs.confirm(
+            self, tr('Завершить без выхода из аккаунтов?'),
+            tr('Приложения и входы останутся в текущем состоянии. Снимок начала сессии будет удалён.'),
+            tr('Завершить без очистки'), dialogs.SIGN_OUT, dialogs.CAUTION,
+        ):
+            self.run_task(tr('Завершаю'), lambda _: self.session.finish_without_cleanup())
+
     def has_selection(self) -> bool:
         """Включена ли хотя бы одна программа в списке «Что очищать»."""
-        return any(card.switch.isChecked() for card in self.target_cards.values())
+        return bool(self.selected_targets())
 
     def start_session(self) -> None:
         # Кнопка в этом случае неактивна, но начать можно и из меню в трее.
-        if not self.has_selection():
-            return
         targets = self.selected_targets()
+        if not targets:
+            return
         try:
             self.session.check_can_close(targets)
         except SessionError as error:
@@ -736,6 +750,8 @@ class MainWindow(QMainWindow):
 
     def end_session(self, confirm: bool = True,
                     on_done: Callable[[bool], None] | None = None) -> None:
+        if self._busy or not self.session.is_active:
+            return
         if confirm:
             text = tr('Всё, что появилось за сессию, — входы в аккаунты, пароли, история — исчезнет.')
             running = self.session.running(self.session.session_targets())
@@ -893,7 +909,14 @@ class MainWindow(QMainWindow):
             return
         self._update_version = version
         self._update_url = url
-        self.update_button.setText(tr('Новая версия {0}').format(version))
+        if updates.is_newer(version, __version__):
+            label = tr('Новая версия {0}')
+        elif updates.is_newer(__version__, version):
+            label = tr('Релиз GitHub {0}')
+        else:
+            self.update_button.hide()
+            return
+        self.update_button.setText(label.format(version))
         self.update_button.show()
 
     def open_update_page(self) -> None:

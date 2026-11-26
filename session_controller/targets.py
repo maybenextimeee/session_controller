@@ -394,8 +394,7 @@ def _ai(local: Path, roaming: Path, home: Path | None) -> list[Target]:
 def _store_data(local: Path, prefix: str, known: str = "") -> tuple[Path, ...]:
     """Папки данных приложения из Microsoft Store: %LOCALAPPDATA%\\Packages\\<имя>_<код>.
 
-    Если приложения ещё нет и имя его пакета известно, берём его — так оно под
-    защитой, даже если его установят посреди сессии.
+    Если папка ещё не создана, получаем ожидаемый путь по известному имени пакета.
     """
     packages = local / "Packages"
     found = sorted(packages.glob(f"{prefix}_*")) if packages.is_dir() else []
@@ -429,7 +428,6 @@ def _is_executable(path: Path) -> bool:
 def _steam_dir() -> Path | None:
     """Папка Steam: из реестра, а если Steam ещё нет — куда его ставят по умолчанию.
 
-    Так Steam под защитой, даже если его установят посреди сессии.
     """
     path = registry.read_string(r"Software\Valve\Steam", "SteamPath")
     if path:

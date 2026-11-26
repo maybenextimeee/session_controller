@@ -79,7 +79,7 @@ jobs:
         shell: pwsh
         timeout-minutes: 5
         run: |
-          $setup = Get-ChildItem dist\SessionController-Setup-*.exe | Select-Object -First 1
+          $setup = Get-Item "dist\SessionController-Setup-${{ steps.version.outputs.version }}.exe"
           $app = "$env:LOCALAPPDATA\Programs\Session Controller"
           $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 
@@ -105,8 +105,8 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SessionController-${{ steps.version.outputs.version }}
-          path: dist/SessionController-Setup-*.exe
+          name: SessionController-Setup-${{ steps.version.outputs.version }}
+          path: dist/SessionController-Setup-${{ steps.version.outputs.version }}.exe
           if-no-files-found: error
 
       - name: Release
@@ -115,9 +115,8 @@ jobs:
         with:
           name: Session Controller ${{ steps.version.outputs.version }}
           body_path: packaging/release-notes.md
-          # Под текстом из body_path GitHub допишет список изменений.
-          generate_release_notes: true
+          generate_release_notes: false
           make_latest: "true"
           # В релиз кладём только установщик: его и нужно скачивать.
-          files: dist/SessionController-Setup-*.exe
+          files: dist/SessionController-Setup-${{ steps.version.outputs.version }}.exe
           fail_on_unmatched_files: true

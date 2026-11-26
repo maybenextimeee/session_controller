@@ -213,6 +213,42 @@ def test_failed_end_keeps_session_and_can_be_retried(home, browser, monkeypatch)
     assert read(cookies) == "cookies before"
 
 
+def test_vpn_is_last_after_restart_and_waits_for_cleanup(home, browser, monkeypatch):
+    vpn = Target("vpn-test", "Test VPN", kind=targets_mod.VPN)
+    targets = [vpn, browser]
+    session = Session(home, targets)
+    events = []
+    monkeypatch.setattr(processes, "close", lambda group: events.append(("close", group[0].id)))
+    session.start(targets)
+    assert events == [("close", browser.id), ("close", vpn.id)]
+
+    resumed = Session(home, targets)
+    resumed.load()
+    def restore(entry):
+        events.append(("restore", entry["id"]))
+        if entry["id"] == browser.id:
+            raise PermissionError("locked file")
+
+    monkeypatch.setattr(resumed, "_restore", restore)
+    events.clear()
+    with pytest.raises(SessionError, match="locked file"):
+        resumed.end()
+    assert events == [("close", browser.id), ("restore", browser.id)]
+    assert resumed.journal_path.exists()
+
+    events.clear()
+    monkeypatch.setattr(resumed, "_restore", lambda entry: events.append(("restore", entry["id"])))
+    with monkeypatch.context() as patch:
+        patch.setattr(processes, "running", lambda group: [browser])
+        with pytest.raises(OSError, match=browser.name):
+            resumed.end()
+        assert events == [("close", browser.id), ("restore", browser.id)]
+    events.clear()
+    resumed.end()
+    assert events == [("close", browser.id), ("restore", browser.id),
+                      ("close", vpn.id), ("restore", vpn.id)]
+
+
 def test_start_twice_is_an_error(home, browser):
     session = Session(home, [browser])
     session.start([browser])

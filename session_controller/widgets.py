@@ -194,11 +194,7 @@ class TargetCard(_ClickableCard):
     """
 
     ICON_SIZE = 22
-    NOT_INSTALLED_HINT = (
-        "Этой программы нет на компьютере.\n"
-        "Если её установят и запустят во время сессии,\n"
-        "при завершении её данные тоже удалятся."
-    )
+    NOT_INSTALLED_HINT = "Новая программа станет доступна после перезапуска Session Controller."
 
     def __init__(self, icon: QIcon, name: str, hint: str, installed: bool = True,
                  parent: QWidget | None = None) -> None:

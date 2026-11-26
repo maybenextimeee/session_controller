@@ -232,7 +232,7 @@ QMainWindow, QDialog, QMessageBox {{
 }}
 QLabel:disabled {{ color: {t.dim}; }}
 
-QLabel#homeHeading {{ font-size: 26pt; font-weight: 650; color: {t.text}; }}
+QLabel#homeHeading {{ font-size: 20pt; font-weight: 650; color: {t.text}; }}
 QToolButton#pin {{ background: {t.surface}; color: {t.muted}; border: 1px solid {t.border}; border-radius: 6px; min-width: 35px; min-height: 39px; font-size: 12pt; }}
 QToolButton#pin:checked, QToolButton#pin:hover {{ color: {t.text}; border-color: {t.border_strong}; }}
 QLabel#appTitle {{
