@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/media/session-controller-logo.png" width="80" height="80" alt="Логотип Session Controller">
+  <img src="assets/icon.ico" width="80" height="80" alt="Логотип Session Controller">
 </p>
 
 <h1 align="center">Session Controller</h1>
